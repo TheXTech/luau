@@ -7,7 +7,7 @@
 #include <algorithm>
 
 #include <errno.h>
-#include <limits.h>
+#include <climits>
 
 LUAU_FASTINTVARIABLE(LuauRecursionLimit, 1000)
 LUAU_FASTINTVARIABLE(LuauTypeLengthLimit, 1000)
