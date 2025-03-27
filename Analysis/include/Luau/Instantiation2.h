@@ -53,7 +53,7 @@ struct Replacer : Substitution
 };
 
 // A substitution which replaces generic functions by monomorphic functions
-struct Instantiation2 : Substitution
+struct Instantiation2 final : Substitution
 {
     // Mapping from generic types to free types to be used in instantiation.
     DenseHashMap<TypeId, TypeId> genericSubstitutions{nullptr};
@@ -75,8 +75,16 @@ struct Instantiation2 : Substitution
 };
 
 std::optional<TypeId> instantiate2(
-    TypeArena* arena, DenseHashMap<TypeId, TypeId> genericSubstitutions, DenseHashMap<TypePackId, TypePackId> genericPackSubstitutions, TypeId ty);
-std::optional<TypePackId> instantiate2(TypeArena* arena, DenseHashMap<TypeId, TypeId> genericSubstitutions,
-    DenseHashMap<TypePackId, TypePackId> genericPackSubstitutions, TypePackId tp);
+    TypeArena* arena,
+    DenseHashMap<TypeId, TypeId> genericSubstitutions,
+    DenseHashMap<TypePackId, TypePackId> genericPackSubstitutions,
+    TypeId ty
+);
+std::optional<TypePackId> instantiate2(
+    TypeArena* arena,
+    DenseHashMap<TypeId, TypeId> genericSubstitutions,
+    DenseHashMap<TypePackId, TypePackId> genericPackSubstitutions,
+    TypePackId tp
+);
 
 } // namespace Luau

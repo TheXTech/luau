@@ -7,9 +7,10 @@
 
 #include "doctest.h"
 
-LUAU_FASTFLAG(LuauDeclarationExtraPropData)
-
 using namespace Luau;
+
+LUAU_FASTINT(LuauTypeInferRecursionLimit)
+LUAU_FASTFLAG(LuauDontForgetToReduceUnionFunc)
 
 TEST_SUITE_BEGIN("DefinitionTests");
 
@@ -80,21 +81,31 @@ TEST_CASE_FIXTURE(Fixture, "definition_file_loading")
 TEST_CASE_FIXTURE(Fixture, "load_definition_file_errors_do_not_pollute_global_scope")
 {
     unfreeze(frontend.globals.globalTypes);
-    LoadDefinitionFileResult parseFailResult = frontend.loadDefinitionFile(frontend.globals, frontend.globals.globalScope, R"(
+    LoadDefinitionFileResult parseFailResult = frontend.loadDefinitionFile(
+        frontend.globals,
+        frontend.globals.globalScope,
+        R"(
         declare foo
     )",
-        "@test", /* captureComments */ false);
+        "@test",
+        /* captureComments */ false
+    );
     freeze(frontend.globals.globalTypes);
 
     REQUIRE(!parseFailResult.success);
     std::optional<Binding> fooTy = tryGetGlobalBinding(frontend.globals, "foo");
     CHECK(!fooTy.has_value());
 
-    LoadDefinitionFileResult checkFailResult = frontend.loadDefinitionFile(frontend.globals, frontend.globals.globalScope, R"(
+    LoadDefinitionFileResult checkFailResult = frontend.loadDefinitionFile(
+        frontend.globals,
+        frontend.globals.globalScope,
+        R"(
         local foo: string = 123
         declare bar: typeof(foo)
     )",
-        "@test", /* captureComments */ false);
+        "@test",
+        /* captureComments */ false
+    );
 
     REQUIRE(!checkFailResult.success);
     std::optional<Binding> barTy = tryGetGlobalBinding(frontend.globals, "bar");
@@ -142,13 +153,18 @@ TEST_CASE_FIXTURE(Fixture, "definition_file_classes")
 TEST_CASE_FIXTURE(Fixture, "class_definitions_cannot_overload_non_function")
 {
     unfreeze(frontend.globals.globalTypes);
-    LoadDefinitionFileResult result = frontend.loadDefinitionFile(frontend.globals, frontend.globals.globalScope, R"(
+    LoadDefinitionFileResult result = frontend.loadDefinitionFile(
+        frontend.globals,
+        frontend.globals.globalScope,
+        R"(
         declare class A
             X: number
             X: string
         end
     )",
-        "@test", /* captureComments */ false);
+        "@test",
+        /* captureComments */ false
+    );
     freeze(frontend.globals.globalTypes);
 
     REQUIRE(!result.success);
@@ -163,13 +179,18 @@ TEST_CASE_FIXTURE(Fixture, "class_definitions_cannot_overload_non_function")
 TEST_CASE_FIXTURE(Fixture, "class_definitions_cannot_extend_non_class")
 {
     unfreeze(frontend.globals.globalTypes);
-    LoadDefinitionFileResult result = frontend.loadDefinitionFile(frontend.globals, frontend.globals.globalScope, R"(
+    LoadDefinitionFileResult result = frontend.loadDefinitionFile(
+        frontend.globals,
+        frontend.globals.globalScope,
+        R"(
         type NotAClass = {}
 
         declare class Foo extends NotAClass
         end
     )",
-        "@test", /* captureComments */ false);
+        "@test",
+        /* captureComments */ false
+    );
     freeze(frontend.globals.globalTypes);
 
     REQUIRE(!result.success);
@@ -184,14 +205,19 @@ TEST_CASE_FIXTURE(Fixture, "class_definitions_cannot_extend_non_class")
 TEST_CASE_FIXTURE(Fixture, "no_cyclic_defined_classes")
 {
     unfreeze(frontend.globals.globalTypes);
-    LoadDefinitionFileResult result = frontend.loadDefinitionFile(frontend.globals, frontend.globals.globalScope, R"(
+    LoadDefinitionFileResult result = frontend.loadDefinitionFile(
+        frontend.globals,
+        frontend.globals.globalScope,
+        R"(
         declare class Foo extends Bar
         end
 
         declare class Bar extends Foo
         end
     )",
-        "@test", /* captureComments */ false);
+        "@test",
+        /* captureComments */ false
+    );
     freeze(frontend.globals.globalTypes);
 
     REQUIRE(!result.success);
@@ -321,8 +347,6 @@ TEST_CASE_FIXTURE(Fixture, "definitions_documentation_symbols")
 
 TEST_CASE_FIXTURE(Fixture, "definitions_symbols_are_generated_for_recursively_referenced_types")
 {
-    ScopedFastFlag luauDeclarationExtraPropData{FFlag::LuauDeclarationExtraPropData, true};
-
     loadDefinition(R"(
         declare class MyClass
             function myMethod(self)
@@ -422,6 +446,26 @@ TEST_CASE_FIXTURE(Fixture, "class_definition_string_props")
     CHECK_EQ(toString(requireType("y")), "string");
 }
 
+TEST_CASE_FIXTURE(Fixture, "class_definition_malformed_string")
+{
+    unfreeze(frontend.globals.globalTypes);
+    LoadDefinitionFileResult result = frontend.loadDefinitionFile(
+        frontend.globals,
+        frontend.globals.globalScope,
+        R"(
+        declare class Foo
+            ["a\0property"]: string
+        end
+    )",
+        "@test",
+        /* captureComments */ false
+    );
+    freeze(frontend.globals.globalTypes);
+
+    REQUIRE(!result.success);
+    REQUIRE_EQ(result.parseResult.errors.size(), 1);
+    CHECK_EQ(result.parseResult.errors[0].getMessage(), "String literal contains malformed escape sequence or \\0");
+}
 
 TEST_CASE_FIXTURE(Fixture, "class_definition_indexer")
 {
@@ -451,8 +495,7 @@ TEST_CASE_FIXTURE(Fixture, "class_definition_indexer")
 
 TEST_CASE_FIXTURE(Fixture, "class_definitions_reference_other_classes")
 {
-    unfreeze(frontend.globals.globalTypes);
-    LoadDefinitionFileResult result = frontend.loadDefinitionFile(frontend.globals, frontend.globals.globalScope, R"(
+    loadDefinition(R"(
         declare class Channel
             Messages: { Message }
             OnMessage: (message: Message) -> ()
@@ -462,11 +505,19 @@ TEST_CASE_FIXTURE(Fixture, "class_definitions_reference_other_classes")
             Text: string
             Channel: Channel
         end
-    )",
-        "@test", /* captureComments */ false);
-    freeze(frontend.globals.globalTypes);
+    )");
 
-    REQUIRE(result.success);
+    CheckResult result = check(R"(
+        local a: Channel
+        local b = a.Messages[1]
+        local c = b.Channel
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+
+    CHECK_EQ(toString(requireType("a")), "Channel");
+    CHECK_EQ(toString(requireType("b")), "Message");
+    CHECK_EQ(toString(requireType("c")), "Channel");
 }
 
 TEST_CASE_FIXTURE(Fixture, "definition_file_has_source_module_name_set")
@@ -488,6 +539,78 @@ TEST_CASE_FIXTURE(Fixture, "definition_file_has_source_module_name_set")
 
     REQUIRE(ctv);
     CHECK_EQ(ctv->definitionModuleName, "@test");
+}
+
+TEST_CASE_FIXTURE(Fixture, "recursive_redefinition_reduces_rightfully")
+{
+    LUAU_REQUIRE_NO_ERRORS(check(R"(
+        local t: {[string]: string} = {}
+
+        local function f()
+            t = t
+        end
+
+        t = t
+    )"));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "cli_142285_reduce_minted_union_func")
+{
+    ScopedFastFlag sffs[] = {
+        {FFlag::LuauSolverV2, true},
+        {FFlag::LuauDontForgetToReduceUnionFunc, true}
+    };
+
+    CheckResult result = check(R"(
+        local function middle(a: number, b: number): number
+            return math.ceil((a + b) / 2 - 0.5)
+        end
+
+        local function find<T>(array: {T}, item: T): number?
+            local l, m, r = 1, middle(1, #array), #array
+            while l <= r do
+                if item <= array[m] then
+                    if item == array[m] then return m end
+                    m, r = middle(l, m-1), m-1
+                else
+                    l, m = middle(m+1, r), m+1
+                end
+            end
+        return nil
+        end
+    )");
+    LUAU_REQUIRE_ERROR_COUNT(3, result);
+    // There are three errors in the above snippet, but they should all be where
+    // clause needed errors.
+    for (const auto& e: result.errors)
+        CHECK(get<WhereClauseNeeded>(e));
+}
+
+TEST_CASE_FIXTURE(Fixture, "vector3_overflow")
+{
+    // We set this to zero to ensure that we either run to completion or stack overflow here.
+    ScopedFastInt sfi{FInt::LuauTypeInferRecursionLimit, 0};
+
+    loadDefinition(R"(
+        declare class Vector3
+            function __add(self, other: Vector3): Vector3
+        end
+    )");
+
+    CheckResult result = check(R"(
+--!strict
+local function graphPoint(t : number, points : { Vector3 }) : Vector3
+    local n : number = #points - 1
+    local p : Vector3 = (nil :: any)
+    for i = 0, n do
+        local x = points[i + 1]
+        p = p and p + x or x
+    end
+    return p
+end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
 }
 
 TEST_SUITE_END();

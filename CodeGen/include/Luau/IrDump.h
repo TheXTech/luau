@@ -2,10 +2,12 @@
 #pragma once
 
 #include "Luau/IrData.h"
-#include "Luau/CodeGen.h"
+#include "Luau/CodeGenOptions.h"
 
 #include <string>
 #include <vector>
+
+struct Proto;
 
 namespace Luau
 {
@@ -23,6 +25,7 @@ struct IrToStringContext
     const std::vector<IrBlock>& blocks;
     const std::vector<IrConst>& constants;
     const CfgInfo& cfg;
+    Proto* proto = nullptr;
 };
 
 void toString(IrToStringContext& ctx, const IrInst& inst, uint32_t index);
@@ -36,9 +39,21 @@ const char* getBytecodeTypeName(uint8_t type, const char* const* userdataTypes);
 void toString(std::string& result, const BytecodeTypes& bcTypes, const char* const* userdataTypes);
 
 void toStringDetailed(
-    IrToStringContext& ctx, const IrBlock& block, uint32_t blockIdx, const IrInst& inst, uint32_t instIdx, IncludeUseInfo includeUseInfo);
-void toStringDetailed(IrToStringContext& ctx, const IrBlock& block, uint32_t blockIdx, IncludeUseInfo includeUseInfo, IncludeCfgInfo includeCfgInfo,
-    IncludeRegFlowInfo includeRegFlowInfo);
+    IrToStringContext& ctx,
+    const IrBlock& block,
+    uint32_t blockIdx,
+    const IrInst& inst,
+    uint32_t instIdx,
+    IncludeUseInfo includeUseInfo
+);
+void toStringDetailed(
+    IrToStringContext& ctx,
+    const IrBlock& block,
+    uint32_t blockIdx,
+    IncludeUseInfo includeUseInfo,
+    IncludeCfgInfo includeCfgInfo,
+    IncludeRegFlowInfo includeRegFlowInfo
+);
 
 std::string toString(const IrFunction& function, IncludeUseInfo includeUseInfo);
 

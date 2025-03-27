@@ -2,6 +2,8 @@
 
 #include "Luau/Generalization.h"
 
+#include "Luau/Common.h"
+#include "Luau/DenseHash.h"
 #include "Luau/Scope.h"
 #include "Luau/Type.h"
 #include "Luau/ToString.h"
@@ -9,11 +11,15 @@
 #include "Luau/TypePack.h"
 #include "Luau/VisitType.h"
 
+LUAU_FASTFLAG(LuauAutocompleteRefactorsForIncrementalAutocomplete)
+LUAU_FASTFLAGVARIABLE(LuauGeneralizationRemoveRecursiveUpperBound2)
+
 namespace Luau
 {
 
 struct MutatingGeneralizer : TypeOnceVisitor
 {
+    NotNull<TypeArena> arena;
     NotNull<BuiltinTypes> builtinTypes;
 
     NotNull<Scope> scope;
@@ -26,9 +32,17 @@ struct MutatingGeneralizer : TypeOnceVisitor
     bool isWithinFunction = false;
     bool avoidSealingTables = false;
 
-    MutatingGeneralizer(NotNull<BuiltinTypes> builtinTypes, NotNull<Scope> scope, NotNull<DenseHashSet<TypeId>> cachedTypes,
-        DenseHashMap<const void*, size_t> positiveTypes, DenseHashMap<const void*, size_t> negativeTypes, bool avoidSealingTables)
+    MutatingGeneralizer(
+        NotNull<TypeArena> arena,
+        NotNull<BuiltinTypes> builtinTypes,
+        NotNull<Scope> scope,
+        NotNull<DenseHashSet<TypeId>> cachedTypes,
+        DenseHashMap<const void*, size_t> positiveTypes,
+        DenseHashMap<const void*, size_t> negativeTypes,
+        bool avoidSealingTables
+    )
         : TypeOnceVisitor(/* skipBoundTypes */ true)
+        , arena(arena)
         , builtinTypes(builtinTypes)
         , scope(scope)
         , cachedTypes(cachedTypes)
@@ -38,7 +52,7 @@ struct MutatingGeneralizer : TypeOnceVisitor
     {
     }
 
-    static void replace(DenseHashSet<TypeId>& seen, TypeId haystack, TypeId needle, TypeId replacement)
+    void replace(DenseHashSet<TypeId>& seen, TypeId haystack, TypeId needle, TypeId replacement)
     {
         haystack = follow(haystack);
 
@@ -85,6 +99,10 @@ struct MutatingGeneralizer : TypeOnceVisitor
                 LUAU_ASSERT(onlyType != haystack);
                 emplaceType<BoundType>(asMutable(haystack), onlyType);
             }
+            else if (FFlag::LuauGeneralizationRemoveRecursiveUpperBound2 && ut->options.empty())
+            {
+                emplaceType<BoundType>(asMutable(haystack), builtinTypes->neverType);
+            }
 
             return;
         }
@@ -127,6 +145,10 @@ struct MutatingGeneralizer : TypeOnceVisitor
                 TypeId onlyType = it->parts[0];
                 LUAU_ASSERT(onlyType != needle);
                 emplaceType<BoundType>(asMutable(needle), onlyType);
+            } 
+            else if (FFlag::LuauGeneralizationRemoveRecursiveUpperBound2 && it->parts.empty())
+            {
+                emplaceType<BoundType>(asMutable(needle), builtinTypes->unknownType);
             }
 
             return;
@@ -337,7 +359,7 @@ struct FreeTypeSearcher : TypeVisitor
     DenseHashSet<const void*> seenPositive{nullptr};
     DenseHashSet<const void*> seenNegative{nullptr};
 
-    bool seenWithPolarity(const void* ty)
+    bool seenWithCurrentPolarity(const void* ty)
     {
         switch (polarity)
         {
@@ -379,7 +401,7 @@ struct FreeTypeSearcher : TypeVisitor
 
     bool visit(TypeId ty) override
     {
-        if (cachedTypes->contains(ty) || seenWithPolarity(ty))
+        if (cachedTypes->contains(ty) || seenWithCurrentPolarity(ty))
             return false;
 
         LUAU_ASSERT(ty);
@@ -388,7 +410,7 @@ struct FreeTypeSearcher : TypeVisitor
 
     bool visit(TypeId ty, const FreeType& ft) override
     {
-        if (cachedTypes->contains(ty) || seenWithPolarity(ty))
+        if (cachedTypes->contains(ty) || seenWithCurrentPolarity(ty))
             return false;
 
         if (!subsumes(scope, ft.scope))
@@ -413,7 +435,7 @@ struct FreeTypeSearcher : TypeVisitor
 
     bool visit(TypeId ty, const TableType& tt) override
     {
-        if (cachedTypes->contains(ty) || seenWithPolarity(ty))
+        if (cachedTypes->contains(ty) || seenWithCurrentPolarity(ty))
             return false;
 
         if ((tt.state == TableState::Free || tt.state == TableState::Unsealed) && subsumes(scope, tt.scope))
@@ -439,7 +461,7 @@ struct FreeTypeSearcher : TypeVisitor
                 traverse(*prop.readTy);
             else
             {
-                LUAU_ASSERT(prop.isShared());
+                LUAU_ASSERT(prop.isShared() || FFlag::LuauAutocompleteRefactorsForIncrementalAutocomplete);
 
                 Polarity p = polarity;
                 polarity = Both;
@@ -459,7 +481,7 @@ struct FreeTypeSearcher : TypeVisitor
 
     bool visit(TypeId ty, const FunctionType& ft) override
     {
-        if (cachedTypes->contains(ty) || seenWithPolarity(ty))
+        if (cachedTypes->contains(ty) || seenWithCurrentPolarity(ty))
             return false;
 
         flip();
@@ -478,7 +500,7 @@ struct FreeTypeSearcher : TypeVisitor
 
     bool visit(TypePackId tp, const FreeTypePack& ftp) override
     {
-        if (seenWithPolarity(tp))
+        if (seenWithCurrentPolarity(tp))
             return false;
 
         if (!subsumes(scope, ftp.scope))
@@ -520,12 +542,12 @@ struct TypeCacher : TypeOnceVisitor
     DenseHashSet<TypePackId> uncacheablePacks{nullptr};
 
     explicit TypeCacher(NotNull<DenseHashSet<TypeId>> cachedTypes)
-        : TypeOnceVisitor(/* skipBoundTypes */ true)
+        : TypeOnceVisitor(/* skipBoundTypes */ false)
         , cachedTypes(cachedTypes)
     {
     }
 
-    void cache(TypeId ty)
+    void cache(TypeId ty) const
     {
         cachedTypes->insert(ty);
     }
@@ -557,9 +579,19 @@ struct TypeCacher : TypeOnceVisitor
 
     bool visit(TypeId ty) override
     {
-        if (isUncacheable(ty) || isCached(ty))
-            return false;
-        return true;
+        // NOTE: `TypeCacher` should explicitly visit _all_ types and type packs,
+        // otherwise it's prone to marking types that cannot be cached as
+        // cacheable.
+        LUAU_ASSERT(false);
+        LUAU_UNREACHABLE();
+    }
+
+    bool visit(TypeId ty, const BoundType& btv) override
+    {
+        traverse(btv.boundTo);
+        if (isUncacheable(btv.boundTo))
+            markUncacheable(ty);
+        return false;
     }
 
     bool visit(TypeId ty, const FreeType& ft) override
@@ -579,6 +611,12 @@ struct TypeCacher : TypeOnceVisitor
     }
 
     bool visit(TypeId ty, const GenericType&) override
+    {
+        cache(ty);
+        return false;
+    }
+
+    bool visit(TypeId ty, const ErrorType&) override
     {
         cache(ty);
         return false;
@@ -721,6 +759,17 @@ struct TypeCacher : TypeOnceVisitor
         return false;
     }
 
+    bool visit(TypeId ty, const MetatableType& mtv) override
+    {
+        traverse(mtv.table);
+        traverse(mtv.metatable);
+        if (isUncacheable(mtv.table) || isUncacheable(mtv.metatable))
+            markUncacheable(ty);
+        else
+            cache(ty);
+        return false;
+    }
+
     bool visit(TypeId ty, const ClassType&) override
     {
         cache(ty);
@@ -728,6 +777,12 @@ struct TypeCacher : TypeOnceVisitor
     }
 
     bool visit(TypeId ty, const AnyType&) override
+    {
+        cache(ty);
+        return false;
+    }
+
+    bool visit(TypeId ty, const NoRefineType&) override
     {
         cache(ty);
         return false;
@@ -835,10 +890,29 @@ struct TypeCacher : TypeOnceVisitor
         return false;
     }
 
+    bool visit(TypePackId tp) override
+    {
+        // NOTE: `TypeCacher` should explicitly visit _all_ types and type packs,
+        // otherwise it's prone to marking types that cannot be cached as
+        // cacheable, which will segfault down the line.
+        LUAU_ASSERT(false);
+        LUAU_UNREACHABLE();
+    }
+
     bool visit(TypePackId tp, const FreeTypePack&) override
     {
         markUncacheable(tp);
         return false;
+    }
+
+    bool visit(TypePackId tp, const GenericTypePack& gtp) override
+    {
+        return true;
+    }
+
+    bool visit(TypePackId tp, const ErrorTypePack& etp) override
+    {
+        return true;
     }
 
     bool visit(TypePackId tp, const VariadicTypePack& vtp) override
@@ -865,23 +939,52 @@ struct TypeCacher : TypeOnceVisitor
         markUncacheable(tp);
         return false;
     }
+
+    bool visit(TypePackId tp, const BoundTypePack& btp) override
+    {
+        traverse(btp.boundTo);
+        if (isUncacheable(btp.boundTo))
+            markUncacheable(tp);
+        return false;
+    }
+
+    bool visit(TypePackId tp, const TypePack& typ) override
+    {
+        bool uncacheable = false;
+        for (TypeId ty : typ.head)
+        {
+            traverse(ty);
+            uncacheable |= isUncacheable(ty);
+        }
+        if (typ.tail)
+        {
+            traverse(*typ.tail);
+            uncacheable |= isUncacheable(*typ.tail);
+        }
+        if (uncacheable)
+            markUncacheable(tp);
+        return false;
+    }
 };
 
-std::optional<TypeId> generalize(NotNull<TypeArena> arena, NotNull<BuiltinTypes> builtinTypes, NotNull<Scope> scope,
-    NotNull<DenseHashSet<TypeId>> cachedTypes, TypeId ty, bool avoidSealingTables)
+std::optional<TypeId> generalize(
+    NotNull<TypeArena> arena,
+    NotNull<BuiltinTypes> builtinTypes,
+    NotNull<Scope> scope,
+    NotNull<DenseHashSet<TypeId>> cachedTypes,
+    TypeId ty,
+    bool avoidSealingTables
+)
 {
     ty = follow(ty);
 
     if (ty->owningArena != arena || ty->persistent)
         return ty;
 
-    if (const FunctionType* ft = get<FunctionType>(ty); ft && (!ft->generics.empty() || !ft->genericPacks.empty()))
-        return ty;
-
     FreeTypeSearcher fts{scope, cachedTypes};
     fts.traverse(ty);
 
-    MutatingGeneralizer gen{builtinTypes, scope, cachedTypes, std::move(fts.positiveTypes), std::move(fts.negativeTypes), avoidSealingTables};
+    MutatingGeneralizer gen{arena, builtinTypes, scope, cachedTypes, std::move(fts.positiveTypes), std::move(fts.negativeTypes), avoidSealingTables};
 
     gen.traverse(ty);
 
@@ -900,8 +1003,17 @@ std::optional<TypeId> generalize(NotNull<TypeArena> arena, NotNull<BuiltinTypes>
     FunctionType* ftv = getMutable<FunctionType>(ty);
     if (ftv)
     {
-        ftv->generics = std::move(gen.generics);
-        ftv->genericPacks = std::move(gen.genericPacks);
+        // If we're generalizing a function type, add any of the newly inferred
+        // generics to the list of existing generic types.
+        for (const auto g : std::move(gen.generics))
+        {
+            ftv->generics.push_back(g);
+        }
+        // Ditto for generic packs.
+        for (const auto gp : std::move(gen.genericPacks))
+        {
+            ftv->genericPacks.push_back(gp);
+        }
     }
 
     return ty;

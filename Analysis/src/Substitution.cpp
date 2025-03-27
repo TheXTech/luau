@@ -4,21 +4,23 @@
 #include "Luau/Common.h"
 #include "Luau/Clone.h"
 #include "Luau/TxnLog.h"
+#include "Luau/Type.h"
 
 #include <algorithm>
 #include <stdexcept>
 
 LUAU_FASTINTVARIABLE(LuauTarjanChildLimit, 10000)
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
-LUAU_FASTINTVARIABLE(LuauTarjanPreallocationSize, 256);
-LUAU_FASTFLAG(LuauReusableSubstitutions)
+LUAU_FASTFLAG(LuauSolverV2)
+LUAU_FASTINTVARIABLE(LuauTarjanPreallocationSize, 256)
+LUAU_FASTFLAG(LuauSyntheticErrors)
 
 namespace Luau
 {
 
 static TypeId shallowClone(TypeId ty, TypeArena& dest, const TxnLog* log, bool alwaysClone)
 {
-    auto go = [ty, &dest, alwaysClone](auto&& a) {
+    auto go = [ty, &dest, alwaysClone](auto&& a)
+    {
         using T = std::decay_t<decltype(a)>;
 
         // The pointer identities of free and local types is very important.
@@ -50,10 +52,32 @@ static TypeId shallowClone(TypeId ty, TypeArena& dest, const TxnLog* log, bool a
             LUAU_ASSERT(ty->persistent);
             return ty;
         }
-        else if constexpr (std::is_same_v<T, ErrorType>)
+        else if constexpr (std::is_same_v<T, NoRefineType>)
         {
             LUAU_ASSERT(ty->persistent);
             return ty;
+        }
+        else if constexpr (std::is_same_v<T, ErrorType>)
+        {
+            if (FFlag::LuauSyntheticErrors)
+            {
+                LUAU_ASSERT(ty->persistent || a.synthetic);
+
+                if (ty->persistent)
+                    return ty;
+
+                // While this code intentionally works (and clones) even if `a.synthetic` is `std::nullopt`,
+                // we still assert above because we consider it a bug to have a non-persistent error type
+                // without any associated metadata. We should always use the persistent version in such cases.
+                ErrorType clone = ErrorType{};
+                clone.synthetic = a.synthetic;
+                return dest.addType(clone);
+            }
+            else
+            {
+                LUAU_ASSERT(ty->persistent);
+                return ty;
+            }
         }
         else if constexpr (std::is_same_v<T, UnknownType>)
         {
@@ -74,9 +98,7 @@ static TypeId shallowClone(TypeId ty, TypeArena& dest, const TxnLog* log, bool a
             FunctionType clone = FunctionType{a.level, a.scope, a.argTypes, a.retTypes, a.definition, a.hasSelf};
             clone.generics = a.generics;
             clone.genericPacks = a.genericPacks;
-            clone.magicFunction = a.magicFunction;
-            clone.dcrMagicFunction = a.dcrMagicFunction;
-            clone.dcrMagicRefinement = a.dcrMagicRefinement;
+            clone.magic = a.magic;
             clone.tags = a.tags;
             clone.argNames = a.argNames;
             clone.isCheckedFunction = a.isCheckedFunction;
@@ -127,7 +149,7 @@ static TypeId shallowClone(TypeId ty, TypeArena& dest, const TxnLog* log, bool a
             return dest.addType(NegationType{a.ty});
         else if constexpr (std::is_same_v<T, TypeFunctionInstanceType>)
         {
-            TypeFunctionInstanceType clone{a.function, a.typeArguments, a.packArguments};
+            TypeFunctionInstanceType clone{a.function, a.typeArguments, a.packArguments, a.userFuncName, a.userFuncData};
             return dest.addType(std::move(clone));
         }
         else
@@ -147,8 +169,8 @@ static TypeId shallowClone(TypeId ty, TypeArena& dest, const TxnLog* log, bool a
 }
 
 Tarjan::Tarjan()
-    : typeToIndex(nullptr, FFlag::LuauReusableSubstitutions ? FInt::LuauTarjanPreallocationSize : 0)
-    , packToIndex(nullptr, FFlag::LuauReusableSubstitutions ? FInt::LuauTarjanPreallocationSize : 0)
+    : typeToIndex(nullptr, FInt::LuauTarjanPreallocationSize)
+    , packToIndex(nullptr, FInt::LuauTarjanPreallocationSize)
 {
     nodes.reserve(FInt::LuauTarjanPreallocationSize);
     stack.reserve(FInt::LuauTarjanPreallocationSize);
@@ -182,7 +204,7 @@ void Tarjan::visitChildren(TypeId ty, int index)
         LUAU_ASSERT(!ttv->boundTo);
         for (const auto& [name, prop] : ttv->props)
         {
-            if (FFlag::DebugLuauDeferredConstraintResolution)
+            if (FFlag::LuauSolverV2)
             {
                 visitChild(prop.readTy);
                 visitChild(prop.writeTy);
@@ -451,28 +473,17 @@ TarjanResult Tarjan::visitRoot(TypePackId tp)
 
 void Tarjan::clearTarjan(const TxnLog* log)
 {
-    if (FFlag::LuauReusableSubstitutions)
-    {
-        typeToIndex.clear(~0u);
-        packToIndex.clear(~0u);
-    }
-    else
-    {
-        typeToIndex.clear();
-        packToIndex.clear();
-    }
+    typeToIndex.clear(~0u);
+    packToIndex.clear(~0u);
 
     nodes.clear();
 
     stack.clear();
 
-    if (FFlag::LuauReusableSubstitutions)
-    {
-        childCount = 0;
-        // childLimit setting stays the same
+    childCount = 0;
+    // childLimit setting stays the same
 
-        this->log = log;
-    }
+    this->log = log;
 
     edgesTy.clear();
     edgesTp.clear();
@@ -628,8 +639,6 @@ std::optional<TypePackId> Substitution::substitute(TypePackId tp)
 
 void Substitution::resetState(const TxnLog* log, TypeArena* arena)
 {
-    LUAU_ASSERT(FFlag::LuauReusableSubstitutions);
-
     clearTarjan(log);
 
     this->arena = arena;
@@ -672,7 +681,8 @@ TypePackId Substitution::clone(TypePackId tp)
     else if (const TypeFunctionInstanceTypePack* tfitp = get<TypeFunctionInstanceTypePack>(tp))
     {
         TypeFunctionInstanceTypePack clone{
-            tfitp->function, std::vector<TypeId>(tfitp->typeArguments.size()), std::vector<TypePackId>(tfitp->packArguments.size())};
+            tfitp->function, std::vector<TypeId>(tfitp->typeArguments.size()), std::vector<TypePackId>(tfitp->packArguments.size())
+        };
         clone.typeArguments.assign(tfitp->typeArguments.begin(), tfitp->typeArguments.end());
         clone.packArguments.assign(tfitp->packArguments.begin(), tfitp->packArguments.end());
         return addTypePack(std::move(clone));
@@ -752,7 +762,7 @@ void Substitution::replaceChildren(TypeId ty)
         LUAU_ASSERT(!ttv->boundTo);
         for (auto& [name, prop] : ttv->props)
         {
-            if (FFlag::DebugLuauDeferredConstraintResolution)
+            if (FFlag::LuauSolverV2)
             {
                 if (prop.readTy)
                     prop.readTy = replace(prop.readTy);

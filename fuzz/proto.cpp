@@ -56,7 +56,7 @@ LUAU_FASTINT(LuauTypeInferIterationLimit)
 LUAU_FASTINT(LuauTarjanChildLimit)
 LUAU_FASTFLAG(DebugLuauFreezeArena)
 LUAU_FASTFLAG(DebugLuauAbortingChecks)
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution)
+LUAU_FASTFLAG(LuauSolverV2)
 
 std::chrono::milliseconds kInterruptTimeout(10);
 std::chrono::time_point<std::chrono::system_clock> interruptDeadline;
@@ -167,7 +167,8 @@ static void setupFrontend(Luau::Frontend& frontend)
     registerTypes(frontend, frontend.globalsForAutocomplete, true);
     Luau::freeze(frontend.globalsForAutocomplete.globalTypes);
 
-    frontend.iceHandler.onInternalError = [](const char* error) {
+    frontend.iceHandler.onInternalError = [](const char* error)
+    {
         printf("ICE: %s\n", error);
         LUAU_ASSERT(!"ICE");
     };
@@ -246,7 +247,7 @@ DEFINE_PROTO_FUZZER(const luau::ModuleSet& message)
 
     FFlag::DebugLuauFreezeArena.value = true;
     FFlag::DebugLuauAbortingChecks.value = true;
-    FFlag::DebugLuauDeferredConstraintResolution.value = kFuzzUseNewSolver;
+    FFlag::LuauSolverV2.value = kFuzzUseNewSolver;
 
     std::vector<std::string> sources = protoprint(message, kFuzzTypes);
 
@@ -394,7 +395,8 @@ DEFINE_PROTO_FUZZER(const luau::ModuleSet& message)
     {
         static lua_State* globalState = createGlobalState();
 
-        auto runCode = [](const std::string& bytecode, bool useCodegen) {
+        auto runCode = [](const std::string& bytecode, bool useCodegen)
+        {
             lua_State* L = lua_newthread(globalState);
             luaL_sandboxthread(L);
 

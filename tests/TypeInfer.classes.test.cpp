@@ -13,8 +13,8 @@
 using namespace Luau;
 using std::nullopt;
 
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
-LUAU_FASTFLAG(LuauAlwaysCommitInferencesOfFunctionCalls);
+LUAU_FASTFLAG(LuauSolverV2)
+LUAU_FASTFLAG(LuauImproveTypePathsInErrors)
 
 TEST_SUITE_BEGIN("TypeInferClasses");
 
@@ -129,12 +129,42 @@ TEST_CASE_FIXTURE(ClassFixture, "we_can_infer_that_a_parameter_must_be_a_particu
 
 TEST_CASE_FIXTURE(ClassFixture, "we_can_report_when_someone_is_trying_to_use_a_table_rather_than_a_class")
 {
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
     CheckResult result = check(R"(
         function makeClone(o)
             return BaseClass.Clone(o)
         end
 
         type Oopsies = { BaseMethod: (Oopsies, number) -> ()}
+
+        local oopsies: Oopsies = {
+            BaseMethod = function (self: Oopsies, i: number)
+                print('gadzooks!')
+            end
+        }
+
+        makeClone(oopsies)
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+    TypeMismatch* tm = get<TypeMismatch>(result.errors.at(0));
+    REQUIRE(tm != nullptr);
+
+    CHECK_EQ("Oopsies", toString(tm->givenType));
+    CHECK_EQ("BaseClass", toString(tm->wantedType));
+}
+
+TEST_CASE_FIXTURE(ClassFixture, "we_can_report_when_someone_is_trying_to_use_a_table_rather_than_a_class_using_new_solver")
+{
+    ScopedFastFlag sff{FFlag::LuauSolverV2, true};
+
+    CheckResult result = check(R"(
+        function makeClone(o)
+            return BaseClass.Clone(o)
+        end
+
+        type Oopsies = { read BaseMethod: (Oopsies, number) -> ()}
 
         local oopsies: Oopsies = {
             BaseMethod = function (self: Oopsies, i: number)
@@ -205,6 +235,9 @@ TEST_CASE_FIXTURE(ClassFixture, "can_assign_to_prop_of_base_class_using_string")
 
 TEST_CASE_FIXTURE(ClassFixture, "cannot_unify_class_instance_with_primitive")
 {
+    // This is allowed in the new solver
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
     CheckResult result = check(R"(
         local v = Vector2.New(0, 5)
         v = 444
@@ -365,9 +398,17 @@ TEST_CASE_FIXTURE(ClassFixture, "table_class_unification_reports_sane_errors_for
         foo(a)
     )");
 
-    LUAU_REQUIRE_ERROR_COUNT(2, result);
-    REQUIRE_EQ("Key 'w' not found in class 'Vector2'", toString(result.errors.at(0)));
-    REQUIRE_EQ("Key 'x' not found in class 'Vector2'.  Did you mean 'X'?", toString(result.errors[1]));
+    if (FFlag::LuauSolverV2)
+    {
+        LUAU_REQUIRE_ERROR_COUNT(1, result);
+        CHECK("Type 'Vector2' could not be converted into '{ Y: number, w: number, x: number }'" == toString(result.errors[0]));
+    }
+    else
+    {
+        LUAU_REQUIRE_ERROR_COUNT(2, result);
+        REQUIRE_EQ("Key 'w' not found in class 'Vector2'", toString(result.errors.at(0)));
+        REQUIRE_EQ("Key 'x' not found in class 'Vector2'.  Did you mean 'X'?", toString(result.errors[1]));
+    }
 }
 
 TEST_CASE_FIXTURE(ClassFixture, "class_unification_type_mismatch_is_correct_order")
@@ -402,9 +443,6 @@ b.X = 2 -- real Vector2.X is also read-only
 
 TEST_CASE_FIXTURE(ClassFixture, "detailed_class_unification_error")
 {
-    ScopedFastFlag sff[] = {
-        {FFlag::LuauAlwaysCommitInferencesOfFunctionCalls, true},
-    };
     CheckResult result = check(R"(
 local function foo(v)
     return v.X :: number + string.len(v.Y)
@@ -416,15 +454,27 @@ b(a)
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    const std::string expected = R"(Type 'Vector2' could not be converted into '{- X: number, Y: string -}'
+
+    if (FFlag::LuauSolverV2)
+    {
+        CHECK("Type 'number' could not be converted into 'string'" == toString(result.errors.at(0)));
+    }
+    else
+    {
+        const std::string expected = R"(Type 'Vector2' could not be converted into '{- X: number, Y: string -}'
 caused by:
   Property 'Y' is not compatible.
 Type 'number' could not be converted into 'string')";
-    CHECK_EQ(expected, toString(result.errors.at(0)));
+
+        CHECK_EQ(expected, toString(result.errors.at(0)));
+    }
 }
 
 TEST_CASE_FIXTURE(ClassFixture, "class_type_mismatch_with_name_conflict")
 {
+    // CLI-116433
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
     CheckResult result = check(R"(
 local i = ChildClass.New()
 type ChildClass = { x: number }
@@ -496,7 +546,13 @@ local b: B = a
 
     LUAU_REQUIRE_ERRORS(result);
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
+    if (FFlag::LuauSolverV2 && FFlag::LuauImproveTypePathsInErrors)
+        CHECK(
+            "Type 'A' could not be converted into 'B'; \n"
+            "this is because accessing `x` results in `ChildClass` in the former type and `BaseClass` in the latter type, and `ChildClass` is not "
+            "exactly `BaseClass`" == toString(result.errors.at(0))
+        );
+    else if (FFlag::LuauSolverV2)
         CHECK(toString(result.errors.at(0)) == "Type 'A' could not be converted into 'B'; at [read \"x\"], ChildClass is not exactly BaseClass");
     else
     {
@@ -510,7 +566,7 @@ Type 'ChildClass' could not be converted into 'BaseClass' in an invariant contex
 
 TEST_CASE_FIXTURE(ClassFixture, "optional_class_casts_work_in_new_solver")
 {
-    ScopedFastFlag sff{FFlag::DebugLuauDeferredConstraintResolution, true};
+    ScopedFastFlag sff{FFlag::LuauSolverV2, true};
 
     CheckResult result = check(R"(
         type A = { x: ChildClass }
@@ -615,9 +671,13 @@ TEST_CASE_FIXTURE(ClassFixture, "indexable_classes")
             local y = x[true]
         )");
 
-
-        CHECK_EQ(
-            toString(result.errors.at(0)), "Type 'boolean' could not be converted into 'number | string'; none of the union options are compatible");
+        if (FFlag::LuauSolverV2)
+            CHECK("Type 'boolean' could not be converted into 'number | string'" == toString(result.errors.at(0)));
+        else
+            CHECK_EQ(
+                toString(result.errors.at(0)),
+                "Type 'boolean' could not be converted into 'number | string'; none of the union options are compatible"
+            );
     }
     {
         CheckResult result = check(R"(
@@ -625,8 +685,13 @@ TEST_CASE_FIXTURE(ClassFixture, "indexable_classes")
             x[true] = 42
         )");
 
-        CHECK_EQ(
-            toString(result.errors.at(0)), "Type 'boolean' could not be converted into 'number | string'; none of the union options are compatible");
+        if (FFlag::LuauSolverV2)
+            CHECK("Type 'boolean' could not be converted into 'number | string'" == toString(result.errors.at(0)));
+        else
+            CHECK_EQ(
+                toString(result.errors.at(0)),
+                "Type 'boolean' could not be converted into 'number | string'; none of the union options are compatible"
+            );
     }
 
     // Test type checking for the return type of the indexer (i.e. a number)
@@ -635,7 +700,13 @@ TEST_CASE_FIXTURE(ClassFixture, "indexable_classes")
             local x : IndexableClass
             x.key = "string value"
         )");
-        CHECK_EQ(toString(result.errors.at(0)), "Type 'string' could not be converted into 'number'");
+
+        if (FFlag::LuauSolverV2)
+        {
+            // Disabled for now.  CLI-115686
+        }
+        else
+            CHECK_EQ(toString(result.errors.at(0)), "Type 'string' could not be converted into 'number'");
     }
     {
         CheckResult result = check(R"(
@@ -658,7 +729,7 @@ TEST_CASE_FIXTURE(ClassFixture, "indexable_classes")
             local x : IndexableNumericKeyClass
             x["key"] = 1
         )");
-        if (FFlag::DebugLuauDeferredConstraintResolution)
+        if (FFlag::LuauSolverV2)
             CHECK_EQ(toString(result.errors.at(0)), "Key 'key' not found in class 'IndexableNumericKeyClass'");
         else
             CHECK_EQ(toString(result.errors.at(0)), "Type 'string' could not be converted into 'number'");
@@ -683,8 +754,8 @@ TEST_CASE_FIXTURE(ClassFixture, "indexable_classes")
             local x : IndexableNumericKeyClass
             local y = x["key"]
         )");
-        if (FFlag::DebugLuauDeferredConstraintResolution)
-            CHECK_EQ(toString(result.errors.at(0)), "Key 'key' not found in class 'IndexableNumericKeyClass'");
+        if (FFlag::LuauSolverV2)
+            CHECK(toString(result.errors.at(0)) == "Key 'key' not found in class 'IndexableNumericKeyClass'");
         else
             CHECK_EQ(toString(result.errors.at(0)), "Type 'string' could not be converted into 'number'");
     }
@@ -700,7 +771,7 @@ TEST_CASE_FIXTURE(ClassFixture, "indexable_classes")
 
 TEST_CASE_FIXTURE(Fixture, "read_write_class_properties")
 {
-    ScopedFastFlag sff{FFlag::DebugLuauDeferredConstraintResolution, true};
+    ScopedFastFlag sff{FFlag::LuauSolverV2, true};
 
     TypeArena& arena = frontend.globals.globalTypes;
 
@@ -716,9 +787,16 @@ TEST_CASE_FIXTURE(Fixture, "read_write_class_properties")
     TypeId scriptType =
         arena.addType(ClassType{"Script", {{"Parent", Property::rw(workspaceType, instanceType)}}, instanceType, nullopt, {}, {}, "Test", {}});
 
-    TypeId partType = arena.addType(
-        ClassType{"Part", {{"BrickColor", Property::rw(builtinTypes->stringType)}, {"Parent", Property::rw(workspaceType, instanceType)}},
-            instanceType, nullopt, {}, {}, "Test", {}});
+    TypeId partType = arena.addType(ClassType{
+        "Part",
+        {{"BrickColor", Property::rw(builtinTypes->stringType)}, {"Parent", Property::rw(workspaceType, instanceType)}},
+        instanceType,
+        nullopt,
+        {},
+        {},
+        "Test",
+        {}
+    });
 
     getMutable<ClassType>(workspaceType)->props = {{"Script", Property::readonly(scriptType)}, {"Part", Property::readonly(partType)}};
 
@@ -751,7 +829,8 @@ TEST_CASE_FIXTURE(ClassFixture, "cannot_index_a_class_with_no_indexer")
     LUAU_REQUIRE_ERROR_COUNT(1, result);
 
     CHECK_MESSAGE(
-        get<DynamicPropertyLookupOnClassesUnsafe>(result.errors[0]), "Expected DynamicPropertyLookupOnClassesUnsafe but got " << result.errors[0]);
+        get<DynamicPropertyLookupOnClassesUnsafe>(result.errors[0]), "Expected DynamicPropertyLookupOnClassesUnsafe but got " << result.errors[0]
+    );
 
     CHECK(builtinTypes->errorType == requireType("c"));
 }

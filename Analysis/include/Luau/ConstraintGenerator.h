@@ -5,6 +5,7 @@
 #include "Luau/Constraint.h"
 #include "Luau/ControlFlow.h"
 #include "Luau/DataFlowGraph.h"
+#include "Luau/EqSatSimplification.h"
 #include "Luau/InsertionOrderedMap.h"
 #include "Luau/Module.h"
 #include "Luau/ModuleResolver.h"
@@ -15,7 +16,6 @@
 #include "Luau/TypeFwd.h"
 #include "Luau/TypeUtils.h"
 #include "Luau/Variant.h"
-#include "Luau/Normalize.h"
 
 #include <memory>
 #include <vector>
@@ -28,6 +28,7 @@ struct Scope;
 using ScopePtr = std::shared_ptr<Scope>;
 
 struct DcrLogger;
+struct TypeFunctionRuntime;
 
 struct Inference
 {
@@ -95,6 +96,9 @@ struct ConstraintGenerator
     // will enqueue them during solving.
     std::vector<ConstraintPtr> unqueuedConstraints;
 
+    // Map a function's signature scope back to its signature type.
+    DenseHashMap<Scope*, TypeId> scopeToFunction{nullptr};
+
     // The private scope of type aliases for which the type parameters belong to.
     DenseHashMap<const AstStatTypeAlias*, ScopePtr> astTypeAliasDefiningScopes{nullptr};
 
@@ -108,12 +112,20 @@ struct ConstraintGenerator
 
     // Needed to be able to enable error-suppression preservation for immediate refinements.
     NotNull<Normalizer> normalizer;
+
+    NotNull<Simplifier> simplifier;
+
+    // Needed to register all available type functions for execution at later stages.
+    NotNull<TypeFunctionRuntime> typeFunctionRuntime;
+    DenseHashMap<const AstStatTypeFunction*, ScopePtr> astTypeFunctionEnvironmentScopes{nullptr};
+
     // Needed to resolve modules to make 'require' import types properly.
     NotNull<ModuleResolver> moduleResolver;
     // Occasionally constraint generation needs to produce an ICE.
     const NotNull<InternalErrorReporter> ice;
 
     ScopePtr globalScope;
+    ScopePtr typeFunctionScope;
 
     std::function<void(const ModuleName&, const ScopePtr&)> prepareModuleScope;
     std::vector<RequireCycle> requireCycles;
@@ -122,9 +134,21 @@ struct ConstraintGenerator
 
     DcrLogger* logger;
 
-    ConstraintGenerator(ModulePtr module, NotNull<Normalizer> normalizer, NotNull<ModuleResolver> moduleResolver, NotNull<BuiltinTypes> builtinTypes,
-        NotNull<InternalErrorReporter> ice, const ScopePtr& globalScope, std::function<void(const ModuleName&, const ScopePtr&)> prepareModuleScope,
-        DcrLogger* logger, NotNull<DataFlowGraph> dfg, std::vector<RequireCycle> requireCycles);
+    ConstraintGenerator(
+        ModulePtr module,
+        NotNull<Normalizer> normalizer,
+        NotNull<Simplifier> simplifier,
+        NotNull<TypeFunctionRuntime> typeFunctionRuntime,
+        NotNull<ModuleResolver> moduleResolver,
+        NotNull<BuiltinTypes> builtinTypes,
+        NotNull<InternalErrorReporter> ice,
+        const ScopePtr& globalScope,
+        const ScopePtr& typeFunctionScope,
+        std::function<void(const ModuleName&, const ScopePtr&)> prepareModuleScope,
+        DcrLogger* logger,
+        NotNull<DataFlowGraph> dfg,
+        std::vector<RequireCycle> requireCycles
+    );
 
     /**
      * The entry point to the ConstraintGenerator. This will construct a set
@@ -132,6 +156,8 @@ struct ConstraintGenerator
      * @param block the root block to generate constraints for.
      */
     void visitModuleRoot(AstStatBlock* block);
+
+    void visitFragmentRoot(const ScopePtr& resumeScope, AstStatBlock* block);
 
 private:
     std::vector<std::vector<TypeId>> interiorTypes;
@@ -195,13 +221,29 @@ private:
     };
 
     using RefinementContext = InsertionOrderedMap<DefId, RefinementPartition>;
-    void unionRefinements(const ScopePtr& scope, Location location, const RefinementContext& lhs, const RefinementContext& rhs,
-        RefinementContext& dest, std::vector<ConstraintV>* constraints);
-    void computeRefinement(const ScopePtr& scope, Location location, RefinementId refinement, RefinementContext* refis, bool sense, bool eq,
-        std::vector<ConstraintV>* constraints);
+    void unionRefinements(
+        const ScopePtr& scope,
+        Location location,
+        const RefinementContext& lhs,
+        const RefinementContext& rhs,
+        RefinementContext& dest,
+        std::vector<ConstraintV>* constraints
+    );
+    void computeRefinement(
+        const ScopePtr& scope,
+        Location location,
+        RefinementId refinement,
+        RefinementContext* refis,
+        bool sense,
+        bool eq,
+        std::vector<ConstraintV>* constraints
+    );
     void applyRefinements(const ScopePtr& scope, Location location, RefinementId refinement);
 
+    LUAU_NOINLINE void checkAliases(const ScopePtr& scope, AstStatBlock* block);
+
     ControlFlow visitBlockWithoutChildScope(const ScopePtr& scope, AstStatBlock* block);
+    ControlFlow visitBlockWithoutChildScope_DEPRECATED(const ScopePtr& scope, AstStatBlock* block);
 
     ControlFlow visit(const ScopePtr& scope, AstStat* stat);
     ControlFlow visit(const ScopePtr& scope, AstStatBlock* block);
@@ -217,6 +259,7 @@ private:
     ControlFlow visit(const ScopePtr& scope, AstStatCompoundAssign* assign);
     ControlFlow visit(const ScopePtr& scope, AstStatIf* ifStatement);
     ControlFlow visit(const ScopePtr& scope, AstStatTypeAlias* alias);
+    ControlFlow visit(const ScopePtr& scope, AstStatTypeFunction* function);
     ControlFlow visit(const ScopePtr& scope, AstStatDeclareGlobal* declareGlobal);
     ControlFlow visit(const ScopePtr& scope, AstStatDeclareClass* declareClass);
     ControlFlow visit(const ScopePtr& scope, AstStatDeclareFunction* declareFunction);
@@ -224,7 +267,11 @@ private:
 
     InferencePack checkPack(const ScopePtr& scope, AstArray<AstExpr*> exprs, const std::vector<std::optional<TypeId>>& expectedTypes = {});
     InferencePack checkPack(
-        const ScopePtr& scope, AstExpr* expr, const std::vector<std::optional<TypeId>>& expectedTypes = {}, bool generalize = true);
+        const ScopePtr& scope,
+        AstExpr* expr,
+        const std::vector<std::optional<TypeId>>& expectedTypes = {},
+        bool generalize = true
+    );
 
     InferencePack checkPack(const ScopePtr& scope, AstExprCall* call);
 
@@ -238,7 +285,12 @@ private:
      * @return the type of the expression.
      */
     Inference check(
-        const ScopePtr& scope, AstExpr* expr, std::optional<TypeId> expectedType = {}, bool forceSingleton = false, bool generalize = true);
+        const ScopePtr& scope,
+        AstExpr* expr,
+        std::optional<TypeId> expectedType = {},
+        bool forceSingleton = false,
+        bool generalize = true
+    );
 
     Inference check(const ScopePtr& scope, AstExprConstantString* string, std::optional<TypeId> expectedType, bool forceSingleton);
     Inference check(const ScopePtr& scope, AstExprConstantBool* bool_, std::optional<TypeId> expectedType, bool forceSingleton);
@@ -250,11 +302,25 @@ private:
     Inference check(const ScopePtr& scope, AstExprFunction* func, std::optional<TypeId> expectedType, bool generalize);
     Inference check(const ScopePtr& scope, AstExprUnary* unary);
     Inference check(const ScopePtr& scope, AstExprBinary* binary, std::optional<TypeId> expectedType);
+    Inference checkAstExprBinary(
+        const ScopePtr& scope,
+        const Location& location,
+        AstExprBinary::Op op,
+        AstExpr* left,
+        AstExpr* right,
+        std::optional<TypeId> expectedType
+    );
     Inference check(const ScopePtr& scope, AstExprIfElse* ifElse, std::optional<TypeId> expectedType);
     Inference check(const ScopePtr& scope, AstExprTypeAssertion* typeAssert);
     Inference check(const ScopePtr& scope, AstExprInterpString* interpString);
     Inference check(const ScopePtr& scope, AstExprTable* expr, std::optional<TypeId> expectedType);
-    std::tuple<TypeId, TypeId, RefinementId> checkBinary(const ScopePtr& scope, AstExprBinary* binary, std::optional<TypeId> expectedType);
+    std::tuple<TypeId, TypeId, RefinementId> checkBinary(
+        const ScopePtr& scope,
+        AstExprBinary::Op op,
+        AstExpr* left,
+        AstExpr* right,
+        std::optional<TypeId> expectedType
+    );
 
     void visitLValue(const ScopePtr& scope, AstExpr* expr, TypeId rhsType);
     void visitLValue(const ScopePtr& scope, AstExprLocal* local, TypeId rhsType);
@@ -276,7 +342,11 @@ private:
     };
 
     FunctionSignature checkFunctionSignature(
-        const ScopePtr& parent, AstExprFunction* fn, std::optional<TypeId> expectedType = {}, std::optional<Location> originalName = {});
+        const ScopePtr& parent,
+        AstExprFunction* fn,
+        std::optional<TypeId> expectedType = {},
+        std::optional<Location> originalName = {}
+    );
 
     /**
      * Checks the body of a function expression.
@@ -284,6 +354,11 @@ private:
      * @param fn the function expression to check.
      */
     void checkFunctionBody(const ScopePtr& scope, AstExprFunction* fn);
+
+    // Specializations of 'resolveType' below
+    TypeId resolveReferenceType(const ScopePtr& scope, AstType* ty, AstTypeReference* ref, bool inTypeArguments, bool replaceErrorWithFresh);
+    TypeId resolveTableType(const ScopePtr& scope, AstType* ty, AstTypeTable* tab, bool inTypeArguments, bool replaceErrorWithFresh);
+    TypeId resolveFunctionType(const ScopePtr& scope, AstType* ty, AstTypeFunction* fn, bool inTypeArguments, bool replaceErrorWithFresh);
 
     /**
      * Resolves a type from its AST annotation.
@@ -323,7 +398,11 @@ private:
      * privateTypeBindings map.
      **/
     std::vector<std::pair<Name, GenericTypeDefinition>> createGenerics(
-        const ScopePtr& scope, AstArray<AstGenericType> generics, bool useCache = false, bool addTypes = true);
+        const ScopePtr& scope,
+        AstArray<AstGenericType*> generics,
+        bool useCache = false,
+        bool addTypes = true
+    );
 
     /**
      * Creates generic type packs given a list of AST definitions, resolving
@@ -336,7 +415,11 @@ private:
      * privateTypePackBindings map.
      **/
     std::vector<std::pair<Name, GenericTypePackDefinition>> createGenericPacks(
-        const ScopePtr& scope, AstArray<AstGenericTypePack> packs, bool useCache = false, bool addTypes = true);
+        const ScopePtr& scope,
+        AstArray<AstGenericTypePack*> packs,
+        bool useCache = false,
+        bool addTypes = true
+    );
 
     Inference flattenPack(const ScopePtr& scope, Location location, InferencePack pack);
 
@@ -347,6 +430,7 @@ private:
     TypeId makeUnion(const ScopePtr& scope, Location location, TypeId lhs, TypeId rhs);
     // make an intersect type function of these two types
     TypeId makeIntersect(const ScopePtr& scope, Location location, TypeId lhs, TypeId rhs);
+    void prepopulateGlobalScopeForFragmentTypecheck(const ScopePtr& globalScope, const ScopePtr& resumeScope, AstStatBlock* program);
 
     /** Scan the program for global definitions.
      *
@@ -371,7 +455,14 @@ private:
     std::vector<std::optional<TypeId>> getExpectedCallTypesForFunctionOverloads(const TypeId fnType);
 
     TypeId createTypeFunctionInstance(
-        const TypeFunction& function, std::vector<TypeId> typeArguments, std::vector<TypePackId> packArguments, const ScopePtr& scope, Location location);
+        const TypeFunction& function,
+        std::vector<TypeId> typeArguments,
+        std::vector<TypePackId> packArguments,
+        const ScopePtr& scope,
+        Location location
+    );
+
+    TypeId simplifyUnion(const ScopePtr& scope, Location location, TypeId left, TypeId right);
 };
 
 /** Borrow a vector of pointers from a vector of owning pointers to constraints.

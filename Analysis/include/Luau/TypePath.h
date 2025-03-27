@@ -42,8 +42,18 @@ struct Property
 /// element.
 struct Index
 {
+    enum class Variant
+    {
+        Pack,
+        Union,
+        Intersection
+    };
+
     /// The 0-based index to use for the lookup.
     size_t index;
+
+    /// The sort of thing we're indexing from, this is used in stringifying the type path for errors.
+    Variant variant;
 
     bool operator==(const Index& other) const;
 };
@@ -51,6 +61,8 @@ struct Index
 /// Represents fields of a type or pack that contain a type.
 enum class TypeField
 {
+    /// The table of a metatable type.
+    Table,
     /// The metatable of a type. This could be a metatable type, a primitive
     /// type, a class type, or perhaps even a string singleton type.
     Metatable,
@@ -202,6 +214,9 @@ using Path = TypePath::Path;
 /// Converts a Path to a string for debugging purposes. This output may not be
 /// terribly clear to end users of the Luau type system.
 std::string toString(const TypePath::Path& path, bool prefixDot = false);
+
+/// Converts a Path to a human readable string for error reporting.
+std::string toStringHuman(const TypePath::Path& path);
 
 std::optional<TypeOrPack> traverse(TypeId root, const Path& path, NotNull<BuiltinTypes> builtinTypes);
 std::optional<TypeOrPack> traverse(TypePackId root, const Path& path, NotNull<BuiltinTypes> builtinTypes);

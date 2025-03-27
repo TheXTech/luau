@@ -10,7 +10,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
+LUAU_FASTFLAG(LuauSolverV2);
 
 namespace Luau
 {
@@ -146,7 +146,8 @@ void StateDot::visitChildren(TypeId ty, int index)
     startNode(index);
     startNodeLabel();
 
-    auto go = [&](auto&& t) {
+    auto go = [&](auto&& t)
+    {
         using T = std::decay_t<decltype(t)>;
 
         if constexpr (std::is_same_v<T, BoundType>)
@@ -253,7 +254,7 @@ void StateDot::visitChildren(TypeId ty, int index)
             finishNodeLabel(ty);
             finishNode();
 
-            if (FFlag::DebugLuauDeferredConstraintResolution)
+            if (FFlag::LuauSolverV2)
             {
                 if (!get<NeverType>(t.lowerBound))
                     visitChild(t.lowerBound, index, "[lowerBound]");
@@ -265,6 +266,12 @@ void StateDot::visitChildren(TypeId ty, int index)
         else if constexpr (std::is_same_v<T, AnyType>)
         {
             formatAppend(result, "AnyType %d", index);
+            finishNodeLabel(ty);
+            finishNode();
+        }
+        else if constexpr (std::is_same_v<T, NoRefineType>)
+        {
+            formatAppend(result, "NoRefineType %d", index);
             finishNodeLabel(ty);
             finishNode();
         }
@@ -413,7 +420,7 @@ void StateDot::visitChildren(TypePackId tp, int index)
         finishNodeLabel(tp);
         finishNode();
     }
-    else if (get<Unifiable::Error>(tp))
+    else if (get<ErrorTypePack>(tp))
     {
         formatAppend(result, "ErrorTypePack %d", index);
         finishNodeLabel(tp);

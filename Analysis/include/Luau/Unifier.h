@@ -93,10 +93,6 @@ struct Unifier
 
     Unifier(NotNull<Normalizer> normalizer, NotNull<Scope> scope, const Location& location, Variance variance, TxnLog* parentLog = nullptr);
 
-    // Configure the Unifier to test for scope subsumption via embedded Scope
-    // pointers rather than TypeLevels.
-    void enableNewSolver();
-
     // Test whether the two type vars unify.  Never commits the result.
     ErrorVec canUnify(TypeId subTy, TypeId superTy);
     ErrorVec canUnify(TypePackId subTy, TypePackId superTy, bool isFunctionCall = false);
@@ -106,11 +102,21 @@ struct Unifier
      * Populate the transaction log with the set of TypeIds that need to be reset to undo the unification attempt.
      */
     void tryUnify(
-        TypeId subTy, TypeId superTy, bool isFunctionCall = false, bool isIntersection = false, const LiteralProperties* aliasableMap = nullptr);
+        TypeId subTy,
+        TypeId superTy,
+        bool isFunctionCall = false,
+        bool isIntersection = false,
+        const LiteralProperties* aliasableMap = nullptr
+    );
 
 private:
     void tryUnify_(
-        TypeId subTy, TypeId superTy, bool isFunctionCall = false, bool isIntersection = false, const LiteralProperties* aliasableMap = nullptr);
+        TypeId subTy,
+        TypeId superTy,
+        bool isFunctionCall = false,
+        bool isIntersection = false,
+        const LiteralProperties* aliasableMap = nullptr
+    );
     void tryUnifyUnionWithType(TypeId subTy, const UnionType* uv, TypeId superTy);
 
     // Traverse the two types provided and block on any BlockedTypes we find.
@@ -120,8 +126,14 @@ private:
     void tryUnifyTypeWithUnion(TypeId subTy, TypeId superTy, const UnionType* uv, bool cacheEnabled, bool isFunctionCall);
     void tryUnifyTypeWithIntersection(TypeId subTy, TypeId superTy, const IntersectionType* uv);
     void tryUnifyIntersectionWithType(TypeId subTy, const IntersectionType* uv, TypeId superTy, bool cacheEnabled, bool isFunctionCall);
-    void tryUnifyNormalizedTypes(TypeId subTy, TypeId superTy, const NormalizedType& subNorm, const NormalizedType& superNorm, std::string reason,
-        std::optional<TypeError> error = std::nullopt);
+    void tryUnifyNormalizedTypes(
+        TypeId subTy,
+        TypeId superTy,
+        const NormalizedType& subNorm,
+        const NormalizedType& superNorm,
+        std::string reason,
+        std::optional<TypeError> error = std::nullopt
+    );
     void tryUnifyPrimitives(TypeId subTy, TypeId superTy);
     void tryUnifySingletons(TypeId subTy, TypeId superTy);
     void tryUnifyFunctions(TypeId subTy, TypeId superTy, bool isFunctionCall = false);
@@ -153,7 +165,6 @@ private:
 
     std::optional<TypeId> findTablePropertyRespectingMeta(TypeId lhsType, Name name);
 
-    TxnLog combineLogsIntoIntersection(std::vector<TxnLog> logs);
     TxnLog combineLogsIntoUnion(std::vector<TxnLog> logs);
 
 public:
@@ -163,7 +174,7 @@ public:
     bool occursCheck(TypePackId needle, TypePackId haystack, bool reversed);
     bool occursCheck(DenseHashSet<TypePackId>& seen, TypePackId needle, TypePackId haystack);
 
-    Unifier makeChildUnifier();
+    std::unique_ptr<Unifier> makeChildUnifier();
 
     void reportError(TypeError err);
     LUAU_NOINLINE void reportError(Location location, TypeErrorData data);
@@ -179,11 +190,6 @@ private:
 
     // Available after regular type pack unification errors
     std::optional<int> firstPackErrorPos;
-
-    // If true, we do a bunch of small things differently to work better with
-    // the new type inference engine. Most notably, we use the Scope hierarchy
-    // directly rather than using TypeLevels.
-    bool useNewSolver = false;
 };
 
 void promoteTypeLevels(TxnLog& log, const TypeArena* arena, TypeLevel minLevel, Scope* outerScope, bool useScope, TypePackId tp);

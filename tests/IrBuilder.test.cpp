@@ -13,8 +13,6 @@
 #include <limits.h>
 
 LUAU_FASTFLAG(DebugLuauAbortingChecks)
-LUAU_FASTFLAG(LuauCodegenFastcall3)
-LUAU_FASTFLAG(LuauCodegenMathSign)
 
 using namespace Luau::CodeGen;
 
@@ -121,6 +119,7 @@ public:
     static const int tnil = 0;
     static const int tboolean = 1;
     static const int tnumber = 3;
+    static const int tvector = 4;
     static const int tstring = 5;
     static const int ttable = 6;
     static const int tfunction = 7;
@@ -334,8 +333,6 @@ TEST_SUITE_BEGIN("ConstantFolding");
 
 TEST_CASE_FIXTURE(IrBuilderFixture, "Numeric")
 {
-    ScopedFastFlag luauCodegenMathSign{FFlag::LuauCodegenMathSign, true};
-
     IrOp block = build.block(IrBlockKind::Internal);
 
     build.beginBlock(block);
@@ -362,7 +359,8 @@ TEST_CASE_FIXTURE(IrBuilderFixture, "Numeric")
 
     build.inst(IrCmd::STORE_INT, build.vmReg(18), build.inst(IrCmd::NOT_ANY, build.constTag(tnil), build.inst(IrCmd::LOAD_DOUBLE, build.vmReg(1))));
     build.inst(
-        IrCmd::STORE_INT, build.vmReg(19), build.inst(IrCmd::NOT_ANY, build.constTag(tnumber), build.inst(IrCmd::LOAD_DOUBLE, build.vmReg(1))));
+        IrCmd::STORE_INT, build.vmReg(19), build.inst(IrCmd::NOT_ANY, build.constTag(tnumber), build.inst(IrCmd::LOAD_DOUBLE, build.vmReg(1)))
+    );
     build.inst(IrCmd::STORE_INT, build.vmReg(20), build.inst(IrCmd::NOT_ANY, build.constTag(tboolean), build.constInt(0)));
     build.inst(IrCmd::STORE_INT, build.vmReg(21), build.inst(IrCmd::NOT_ANY, build.constTag(tboolean), build.constInt(1)));
 
@@ -629,21 +627,33 @@ bb_0:
 
 TEST_CASE_FIXTURE(IrBuilderFixture, "ControlFlowEq")
 {
-    withTwoBlocks([this](IrOp a, IrOp b) {
-        build.inst(IrCmd::JUMP_EQ_TAG, build.constTag(tnil), build.constTag(tnil), a, b);
-    });
+    withTwoBlocks(
+        [this](IrOp a, IrOp b)
+        {
+            build.inst(IrCmd::JUMP_EQ_TAG, build.constTag(tnil), build.constTag(tnil), a, b);
+        }
+    );
 
-    withTwoBlocks([this](IrOp a, IrOp b) {
-        build.inst(IrCmd::JUMP_EQ_TAG, build.constTag(tnil), build.constTag(tnumber), a, b);
-    });
+    withTwoBlocks(
+        [this](IrOp a, IrOp b)
+        {
+            build.inst(IrCmd::JUMP_EQ_TAG, build.constTag(tnil), build.constTag(tnumber), a, b);
+        }
+    );
 
-    withTwoBlocks([this](IrOp a, IrOp b) {
-        build.inst(IrCmd::JUMP_CMP_INT, build.constInt(0), build.constInt(0), build.cond(IrCondition::Equal), a, b);
-    });
+    withTwoBlocks(
+        [this](IrOp a, IrOp b)
+        {
+            build.inst(IrCmd::JUMP_CMP_INT, build.constInt(0), build.constInt(0), build.cond(IrCondition::Equal), a, b);
+        }
+    );
 
-    withTwoBlocks([this](IrOp a, IrOp b) {
-        build.inst(IrCmd::JUMP_CMP_INT, build.constInt(0), build.constInt(1), build.cond(IrCondition::Equal), a, b);
-    });
+    withTwoBlocks(
+        [this](IrOp a, IrOp b)
+        {
+            build.inst(IrCmd::JUMP_CMP_INT, build.constInt(0), build.constInt(1), build.cond(IrCondition::Equal), a, b);
+        }
+    );
 
     updateUseCounts(build.function);
     constantFold();
@@ -678,21 +688,30 @@ bb_11:
 
 TEST_CASE_FIXTURE(IrBuilderFixture, "NumToIndex")
 {
-    withOneBlock([this](IrOp a) {
-        build.inst(IrCmd::STORE_INT, build.vmReg(0), build.inst(IrCmd::TRY_NUM_TO_INDEX, build.constDouble(4), a));
-        build.inst(IrCmd::RETURN, build.constUint(0));
-    });
+    withOneBlock(
+        [this](IrOp a)
+        {
+            build.inst(IrCmd::STORE_INT, build.vmReg(0), build.inst(IrCmd::TRY_NUM_TO_INDEX, build.constDouble(4), a));
+            build.inst(IrCmd::RETURN, build.constUint(0));
+        }
+    );
 
-    withOneBlock([this](IrOp a) {
-        build.inst(IrCmd::STORE_INT, build.vmReg(0), build.inst(IrCmd::TRY_NUM_TO_INDEX, build.constDouble(1.2), a));
-        build.inst(IrCmd::RETURN, build.constUint(0));
-    });
+    withOneBlock(
+        [this](IrOp a)
+        {
+            build.inst(IrCmd::STORE_INT, build.vmReg(0), build.inst(IrCmd::TRY_NUM_TO_INDEX, build.constDouble(1.2), a));
+            build.inst(IrCmd::RETURN, build.constUint(0));
+        }
+    );
 
-    withOneBlock([this](IrOp a) {
-        IrOp nan = build.inst(IrCmd::DIV_NUM, build.constDouble(0.0), build.constDouble(0.0));
-        build.inst(IrCmd::STORE_INT, build.vmReg(0), build.inst(IrCmd::TRY_NUM_TO_INDEX, nan, a));
-        build.inst(IrCmd::RETURN, build.constUint(0));
-    });
+    withOneBlock(
+        [this](IrOp a)
+        {
+            IrOp nan = build.inst(IrCmd::DIV_NUM, build.constDouble(0.0), build.constDouble(0.0));
+            build.inst(IrCmd::STORE_INT, build.vmReg(0), build.inst(IrCmd::TRY_NUM_TO_INDEX, nan, a));
+            build.inst(IrCmd::RETURN, build.constUint(0));
+        }
+    );
 
     updateUseCounts(build.function);
     constantFold();
@@ -719,15 +738,21 @@ bb_5:
 
 TEST_CASE_FIXTURE(IrBuilderFixture, "Guards")
 {
-    withOneBlock([this](IrOp a) {
-        build.inst(IrCmd::CHECK_TAG, build.constTag(tnumber), build.constTag(tnumber), a);
-        build.inst(IrCmd::RETURN, build.constUint(0));
-    });
+    withOneBlock(
+        [this](IrOp a)
+        {
+            build.inst(IrCmd::CHECK_TAG, build.constTag(tnumber), build.constTag(tnumber), a);
+            build.inst(IrCmd::RETURN, build.constUint(0));
+        }
+    );
 
-    withOneBlock([this](IrOp a) {
-        build.inst(IrCmd::CHECK_TAG, build.constTag(tnil), build.constTag(tnumber), a);
-        build.inst(IrCmd::RETURN, build.constUint(0));
-    });
+    withOneBlock(
+        [this](IrOp a)
+        {
+            build.inst(IrCmd::CHECK_TAG, build.constTag(tnil), build.constTag(tnumber), a);
+            build.inst(IrCmd::RETURN, build.constUint(0));
+        }
+    );
 
     updateUseCounts(build.function);
     constantFold();
@@ -747,16 +772,21 @@ bb_3:
 
 TEST_CASE_FIXTURE(IrBuilderFixture, "ControlFlowCmpNum")
 {
-    auto compareFold = [this](IrOp lhs, IrOp rhs, IrCondition cond, bool result) {
+    auto compareFold = [this](IrOp lhs, IrOp rhs, IrCondition cond, bool result)
+    {
         IrOp instOp;
         IrInst instExpected;
 
-        withTwoBlocks([&](IrOp a, IrOp b) {
-            IrOp nan = build.inst(IrCmd::DIV_NUM, build.constDouble(0.0), build.constDouble(0.0));
-            instOp = build.inst(
-                IrCmd::JUMP_CMP_NUM, lhs.kind == IrOpKind::None ? nan : lhs, rhs.kind == IrOpKind::None ? nan : rhs, build.cond(cond), a, b);
-            instExpected = IrInst{IrCmd::JUMP, result ? a : b};
-        });
+        withTwoBlocks(
+            [&](IrOp a, IrOp b)
+            {
+                IrOp nan = build.inst(IrCmd::DIV_NUM, build.constDouble(0.0), build.constDouble(0.0));
+                instOp = build.inst(
+                    IrCmd::JUMP_CMP_NUM, lhs.kind == IrOpKind::None ? nan : lhs, rhs.kind == IrOpKind::None ? nan : rhs, build.cond(cond), a, b
+                );
+                instExpected = IrInst{IrCmd::JUMP, result ? a : b};
+            }
+        );
 
         updateUseCounts(build.function);
         constantFold();
@@ -1134,8 +1164,16 @@ TEST_CASE_FIXTURE(IrBuilderFixture, "BuiltinFastcallsMayInvalidateMemory")
     build.inst(IrCmd::CHECK_NO_METATABLE, table, fallback);
     build.inst(IrCmd::CHECK_READONLY, table, fallback);
 
-    build.inst(IrCmd::INVOKE_FASTCALL, build.constUint(LBF_SETMETATABLE), build.vmReg(1), build.vmReg(2), build.vmReg(3), build.undef(),
-        build.constInt(3), build.constInt(1));
+    build.inst(
+        IrCmd::INVOKE_FASTCALL,
+        build.constUint(LBF_SETMETATABLE),
+        build.vmReg(1),
+        build.vmReg(2),
+        build.vmReg(3),
+        build.undef(),
+        build.constInt(3),
+        build.constInt(1)
+    );
 
     build.inst(IrCmd::CHECK_NO_METATABLE, table, fallback);
     build.inst(IrCmd::CHECK_READONLY, table, fallback);
@@ -1679,6 +1717,55 @@ bb_0:
 
 bb_fallback_1:
    RETURN 1u
+
+)");
+}
+
+TEST_CASE_FIXTURE(IrBuilderFixture, "NumericSimplifications")
+{
+    IrOp block = build.block(IrBlockKind::Internal);
+
+    build.beginBlock(block);
+    IrOp value = build.inst(IrCmd::LOAD_DOUBLE, build.vmReg(0));
+
+    build.inst(IrCmd::STORE_DOUBLE, build.vmReg(1), build.inst(IrCmd::SUB_NUM, value, build.constDouble(0.0)));
+    build.inst(IrCmd::STORE_DOUBLE, build.vmReg(2), build.inst(IrCmd::ADD_NUM, value, build.constDouble(-0.0)));
+
+    build.inst(IrCmd::STORE_DOUBLE, build.vmReg(3), build.inst(IrCmd::MUL_NUM, value, build.constDouble(1.0)));
+    build.inst(IrCmd::STORE_DOUBLE, build.vmReg(4), build.inst(IrCmd::MUL_NUM, value, build.constDouble(2.0)));
+    build.inst(IrCmd::STORE_DOUBLE, build.vmReg(5), build.inst(IrCmd::MUL_NUM, value, build.constDouble(-1.0)));
+    build.inst(IrCmd::STORE_DOUBLE, build.vmReg(6), build.inst(IrCmd::MUL_NUM, value, build.constDouble(3.0)));
+
+    build.inst(IrCmd::STORE_DOUBLE, build.vmReg(7), build.inst(IrCmd::DIV_NUM, value, build.constDouble(1.0)));
+    build.inst(IrCmd::STORE_DOUBLE, build.vmReg(8), build.inst(IrCmd::DIV_NUM, value, build.constDouble(-1.0)));
+    build.inst(IrCmd::STORE_DOUBLE, build.vmReg(9), build.inst(IrCmd::DIV_NUM, value, build.constDouble(32.0)));
+    build.inst(IrCmd::STORE_DOUBLE, build.vmReg(10), build.inst(IrCmd::DIV_NUM, value, build.constDouble(6.0)));
+
+    build.inst(IrCmd::RETURN, build.vmReg(1), build.constInt(9));
+
+    updateUseCounts(build.function);
+    constPropInBlockChains(build, true);
+
+    CHECK("\n" + toString(build.function, IncludeUseInfo::No) == R"(
+bb_0:
+   %0 = LOAD_DOUBLE R0
+   STORE_DOUBLE R1, %0
+   STORE_DOUBLE R2, %0
+   STORE_DOUBLE R3, %0
+   %7 = ADD_NUM %0, %0
+   STORE_DOUBLE R4, %7
+   %9 = UNM_NUM %0
+   STORE_DOUBLE R5, %9
+   %11 = MUL_NUM %0, 3
+   STORE_DOUBLE R6, %11
+   STORE_DOUBLE R7, %0
+   %15 = UNM_NUM %0
+   STORE_DOUBLE R8, %15
+   %17 = MUL_NUM %0, 0.03125
+   STORE_DOUBLE R9, %17
+   %19 = DIV_NUM %0, 6
+   STORE_DOUBLE R10, %19
+   RETURN R1, 9i
 
 )");
 }
@@ -2590,8 +2677,6 @@ bb_1:
 
 TEST_CASE_FIXTURE(IrBuilderFixture, "FastCallEffects1")
 {
-    ScopedFastFlag luauCodegenFastcall3{FFlag::LuauCodegenFastcall3, true};
-
     IrOp entry = build.block(IrBlockKind::Internal);
 
     build.beginBlock(entry);
@@ -2615,8 +2700,6 @@ bb_0:
 
 TEST_CASE_FIXTURE(IrBuilderFixture, "FastCallEffects2")
 {
-    ScopedFastFlag luauCodegenFastcall3{FFlag::LuauCodegenFastcall3, true};
-
     IrOp entry = build.block(IrBlockKind::Internal);
 
     build.beginBlock(entry);
@@ -2811,15 +2894,21 @@ bb_1:
 
 TEST_CASE_FIXTURE(IrBuilderFixture, "ExplicitUseOfRegisterInVarargSequence")
 {
-    ScopedFastFlag luauCodegenFastcall3{FFlag::LuauCodegenFastcall3, true};
-
     IrOp entry = build.block(IrBlockKind::Internal);
     IrOp exit = build.block(IrBlockKind::Internal);
 
     build.beginBlock(entry);
     build.inst(IrCmd::FALLBACK_GETVARARGS, build.constUint(0), build.vmReg(1), build.constInt(-1));
-    IrOp results = build.inst(IrCmd::INVOKE_FASTCALL, build.constUint(0), build.vmReg(0), build.vmReg(1), build.vmReg(2), build.undef(),
-        build.constInt(-1), build.constInt(-1));
+    IrOp results = build.inst(
+        IrCmd::INVOKE_FASTCALL,
+        build.constUint(0),
+        build.vmReg(0),
+        build.vmReg(1),
+        build.vmReg(2),
+        build.undef(),
+        build.constInt(-1),
+        build.constInt(-1)
+    );
     build.inst(IrCmd::ADJUST_STACK_TO_REG, build.vmReg(0), results);
     build.inst(IrCmd::JUMP, exit);
 
@@ -4353,7 +4442,8 @@ TEST_CASE_FIXTURE(IrBuilderFixture, "PartialOverFullValue")
     build.inst(IrCmd::STORE_DOUBLE, build.vmReg(0), build.constDouble(2.0));
     build.inst(IrCmd::STORE_DOUBLE, build.vmReg(0), build.constDouble(4.0));
     build.inst(
-        IrCmd::STORE_SPLIT_TVALUE, build.vmReg(0), build.constTag(ttable), build.inst(IrCmd::NEW_TABLE, build.constUint(16), build.constUint(32)));
+        IrCmd::STORE_SPLIT_TVALUE, build.vmReg(0), build.constTag(ttable), build.inst(IrCmd::NEW_TABLE, build.constUint(16), build.constUint(32))
+    );
     build.inst(IrCmd::STORE_POINTER, build.vmReg(0), build.inst(IrCmd::NEW_TABLE, build.constUint(8), build.constUint(16)));
     build.inst(IrCmd::STORE_POINTER, build.vmReg(0), build.inst(IrCmd::NEW_TABLE, build.constUint(4), build.constUint(8)));
     build.inst(IrCmd::STORE_SPLIT_TVALUE, build.vmReg(0), build.constTag(tnumber), build.constDouble(1.0));
@@ -4371,6 +4461,194 @@ TEST_CASE_FIXTURE(IrBuilderFixture, "PartialOverFullValue")
 bb_0:
    %11 = NEW_TABLE 16u, 32u
    STORE_SPLIT_TVALUE R0, ttable, %11
+   RETURN R0, 1i
+
+)");
+}
+
+TEST_CASE_FIXTURE(IrBuilderFixture, "VectorOverNumber")
+{
+    IrOp entry = build.block(IrBlockKind::Internal);
+
+    build.beginBlock(entry);
+    build.inst(IrCmd::STORE_DOUBLE, build.vmReg(0), build.constDouble(2.0));
+    build.inst(IrCmd::STORE_TAG, build.vmReg(0), build.constTag(tnumber));
+    build.inst(IrCmd::STORE_VECTOR, build.vmReg(0), build.constDouble(1.0), build.constDouble(2.0), build.constDouble(4.0));
+    build.inst(IrCmd::STORE_TAG, build.vmReg(0), build.constTag(tvector));
+    build.inst(IrCmd::RETURN, build.vmReg(0), build.constInt(1));
+
+    updateUseCounts(build.function);
+    computeCfgInfo(build.function);
+    markDeadStoresInBlockChains(build);
+
+    CHECK("\n" + toString(build.function, IncludeUseInfo::No) == R"(
+bb_0:
+   STORE_VECTOR R0, 1, 2, 4, tvector
+   RETURN R0, 1i
+
+)");
+}
+
+TEST_CASE_FIXTURE(IrBuilderFixture, "VectorOverVector")
+{
+    IrOp entry = build.block(IrBlockKind::Internal);
+
+    build.beginBlock(entry);
+    build.inst(IrCmd::STORE_VECTOR, build.vmReg(0), build.constDouble(4.0), build.constDouble(2.0), build.constDouble(1.0));
+    build.inst(IrCmd::STORE_TAG, build.vmReg(0), build.constTag(tvector));
+    build.inst(IrCmd::STORE_VECTOR, build.vmReg(0), build.constDouble(1.0), build.constDouble(2.0), build.constDouble(4.0));
+    build.inst(IrCmd::STORE_TAG, build.vmReg(0), build.constTag(tvector));
+    build.inst(IrCmd::RETURN, build.vmReg(0), build.constInt(1));
+
+    updateUseCounts(build.function);
+    computeCfgInfo(build.function);
+    markDeadStoresInBlockChains(build);
+
+    CHECK("\n" + toString(build.function, IncludeUseInfo::No) == R"(
+bb_0:
+   STORE_VECTOR R0, 1, 2, 4, tvector
+   RETURN R0, 1i
+
+)");
+}
+
+TEST_CASE_FIXTURE(IrBuilderFixture, "NumberOverVector")
+{
+    IrOp entry = build.block(IrBlockKind::Internal);
+
+    build.beginBlock(entry);
+    build.inst(IrCmd::STORE_VECTOR, build.vmReg(0), build.constDouble(1.0), build.constDouble(2.0), build.constDouble(4.0));
+    build.inst(IrCmd::STORE_TAG, build.vmReg(0), build.constTag(tvector));
+    build.inst(IrCmd::STORE_DOUBLE, build.vmReg(0), build.constDouble(2.0));
+    build.inst(IrCmd::STORE_TAG, build.vmReg(0), build.constTag(tnumber));
+    build.inst(IrCmd::RETURN, build.vmReg(0), build.constInt(1));
+
+    updateUseCounts(build.function);
+    computeCfgInfo(build.function);
+    markDeadStoresInBlockChains(build);
+
+    CHECK("\n" + toString(build.function, IncludeUseInfo::No) == R"(
+bb_0:
+   STORE_SPLIT_TVALUE R0, tnumber, 2
+   RETURN R0, 1i
+
+)");
+}
+
+TEST_CASE_FIXTURE(IrBuilderFixture, "NumberOverNil")
+{
+    IrOp entry = build.block(IrBlockKind::Internal);
+
+    build.beginBlock(entry);
+    build.inst(IrCmd::STORE_TAG, build.vmReg(0), build.constTag(tnil));
+    build.inst(IrCmd::STORE_DOUBLE, build.vmReg(0), build.constDouble(2.0));
+    build.inst(IrCmd::STORE_TAG, build.vmReg(0), build.constTag(tnumber));
+    build.inst(IrCmd::RETURN, build.vmReg(0), build.constInt(1));
+
+    updateUseCounts(build.function);
+    computeCfgInfo(build.function);
+    markDeadStoresInBlockChains(build);
+
+    CHECK("\n" + toString(build.function, IncludeUseInfo::No) == R"(
+bb_0:
+   STORE_SPLIT_TVALUE R0, tnumber, 2
+   RETURN R0, 1i
+
+)");
+}
+
+TEST_CASE_FIXTURE(IrBuilderFixture, "VectorOverNil")
+{
+    IrOp entry = build.block(IrBlockKind::Internal);
+
+    build.beginBlock(entry);
+    build.inst(IrCmd::STORE_TAG, build.vmReg(0), build.constTag(tnil));
+    build.inst(IrCmd::STORE_VECTOR, build.vmReg(0), build.constDouble(1.0), build.constDouble(2.0), build.constDouble(4.0));
+    build.inst(IrCmd::STORE_TAG, build.vmReg(0), build.constTag(tvector));
+    build.inst(IrCmd::RETURN, build.vmReg(0), build.constInt(1));
+
+    updateUseCounts(build.function);
+    computeCfgInfo(build.function);
+    markDeadStoresInBlockChains(build);
+
+    CHECK("\n" + toString(build.function, IncludeUseInfo::No) == R"(
+bb_0:
+   STORE_VECTOR R0, 1, 2, 4, tvector
+   RETURN R0, 1i
+
+)");
+}
+
+TEST_CASE_FIXTURE(IrBuilderFixture, "NumberOverCombinedVector")
+{
+    IrOp entry = build.block(IrBlockKind::Internal);
+
+    build.beginBlock(entry);
+    build.inst(IrCmd::STORE_DOUBLE, build.vmReg(0), build.constDouble(2.0));
+    build.inst(IrCmd::STORE_TAG, build.vmReg(0), build.constTag(tnumber));
+    build.inst(IrCmd::STORE_VECTOR, build.vmReg(0), build.constDouble(1.0), build.constDouble(2.0), build.constDouble(4.0));
+    build.inst(IrCmd::STORE_TAG, build.vmReg(0), build.constTag(tvector));
+    build.inst(IrCmd::STORE_DOUBLE, build.vmReg(0), build.constDouble(3.0));
+    build.inst(IrCmd::STORE_TAG, build.vmReg(0), build.constTag(tnumber));
+    build.inst(IrCmd::RETURN, build.vmReg(0), build.constInt(1));
+
+    updateUseCounts(build.function);
+    computeCfgInfo(build.function);
+    markDeadStoresInBlockChains(build);
+
+    CHECK("\n" + toString(build.function, IncludeUseInfo::No) == R"(
+bb_0:
+   STORE_SPLIT_TVALUE R0, tnumber, 3
+   RETURN R0, 1i
+
+)");
+}
+
+TEST_CASE_FIXTURE(IrBuilderFixture, "VectorOverCombinedVector")
+{
+    IrOp entry = build.block(IrBlockKind::Internal);
+
+    build.beginBlock(entry);
+    build.inst(IrCmd::STORE_DOUBLE, build.vmReg(0), build.constDouble(2.0));
+    build.inst(IrCmd::STORE_TAG, build.vmReg(0), build.constTag(tnumber));
+    build.inst(IrCmd::STORE_VECTOR, build.vmReg(0), build.constDouble(1.0), build.constDouble(2.0), build.constDouble(4.0));
+    build.inst(IrCmd::STORE_TAG, build.vmReg(0), build.constTag(tvector));
+    build.inst(IrCmd::STORE_VECTOR, build.vmReg(0), build.constDouble(8.0), build.constDouble(16.0), build.constDouble(32.0));
+    build.inst(IrCmd::STORE_TAG, build.vmReg(0), build.constTag(tvector));
+    build.inst(IrCmd::RETURN, build.vmReg(0), build.constInt(1));
+
+    updateUseCounts(build.function);
+    computeCfgInfo(build.function);
+    markDeadStoresInBlockChains(build);
+
+    CHECK("\n" + toString(build.function, IncludeUseInfo::No) == R"(
+bb_0:
+   STORE_VECTOR R0, 8, 16, 32, tvector
+   RETURN R0, 1i
+
+)");
+}
+
+TEST_CASE_FIXTURE(IrBuilderFixture, "VectorOverCombinedNumber")
+{
+    IrOp entry = build.block(IrBlockKind::Internal);
+
+    build.beginBlock(entry);
+    build.inst(IrCmd::STORE_DOUBLE, build.vmReg(0), build.constDouble(2.0));
+    build.inst(IrCmd::STORE_TAG, build.vmReg(0), build.constTag(tnumber));
+    build.inst(IrCmd::STORE_DOUBLE, build.vmReg(0), build.constDouble(4.0));
+    build.inst(IrCmd::STORE_TAG, build.vmReg(0), build.constTag(tnumber));
+    build.inst(IrCmd::STORE_VECTOR, build.vmReg(0), build.constDouble(8.0), build.constDouble(16.0), build.constDouble(32.0));
+    build.inst(IrCmd::STORE_TAG, build.vmReg(0), build.constTag(tvector));
+    build.inst(IrCmd::RETURN, build.vmReg(0), build.constInt(1));
+
+    updateUseCounts(build.function);
+    computeCfgInfo(build.function);
+    markDeadStoresInBlockChains(build);
+
+    CHECK("\n" + toString(build.function, IncludeUseInfo::No) == R"(
+bb_0:
+   STORE_VECTOR R0, 8, 16, 32, tvector
    RETURN R0, 1i
 
 )");

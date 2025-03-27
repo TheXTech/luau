@@ -3,6 +3,7 @@
 
 #include "Luau/DenseHash.h"
 #include "Luau/Normalize.h"
+#include "Luau/ToString.h"
 #include "Luau/TypeFunction.h"
 #include "Luau/Type.h"
 #include "Luau/TypePack.h"
@@ -128,7 +129,10 @@ std::optional<TypePackId> TypeFunctionReductionGuesser::guess(TypePackId tp)
 }
 
 TypeFunctionReductionGuessResult TypeFunctionReductionGuesser::guessTypeFunctionReductionForFunctionExpr(
-    const AstExprFunction& expr, const FunctionType* ftv, TypeId retTy)
+    const AstExprFunction& expr,
+    const FunctionType* ftv,
+    TypeId retTy
+)
 {
     InstanceCollector2 collector;
     collector.traverse(retTy);
@@ -204,8 +208,9 @@ std::optional<TypeId> TypeFunctionReductionGuesser::guessType(TypeId arg)
 
 bool TypeFunctionReductionGuesser::isNumericBinopFunction(const TypeFunctionInstanceType& instance)
 {
-    return instance.function->name == "add" || instance.function->name == "sub" || instance.function->name == "mul" || instance.function->name == "div" ||
-           instance.function->name == "idiv" || instance.function->name == "pow" || instance.function->name == "mod";
+    return instance.function->name == "add" || instance.function->name == "sub" || instance.function->name == "mul" ||
+           instance.function->name == "div" || instance.function->name == "idiv" || instance.function->name == "pow" ||
+           instance.function->name == "mod";
 }
 
 bool TypeFunctionReductionGuesser::isComparisonFunction(const TypeFunctionInstanceType& instance)
@@ -350,7 +355,8 @@ TypeFunctionInferenceResult TypeFunctionReductionGuesser::inferComparisonFunctio
     TypeId lhsTy = follow(instance->typeArguments[0]);
     TypeId rhsTy = follow(instance->typeArguments[1]);
 
-    auto comparisonInference = [&](TypeId op) -> TypeFunctionInferenceResult {
+    auto comparisonInference = [&](TypeId op) -> TypeFunctionInferenceResult
+    {
         return TypeFunctionInferenceResult{{op, op}, builtins->booleanType};
     };
 

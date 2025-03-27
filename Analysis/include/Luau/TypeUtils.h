@@ -40,7 +40,7 @@ struct InConditionalContext
     TypeContext* typeContext;
     TypeContext oldValue;
 
-    InConditionalContext(TypeContext* c)
+    explicit InConditionalContext(TypeContext* c)
         : typeContext(c)
         , oldValue(*c)
     {
@@ -56,14 +56,35 @@ struct InConditionalContext
 using ScopePtr = std::shared_ptr<struct Scope>;
 
 std::optional<Property> findTableProperty(
-    NotNull<BuiltinTypes> builtinTypes, ErrorVec& errors, TypeId ty, const std::string& name, Location location);
+    NotNull<BuiltinTypes> builtinTypes,
+    ErrorVec& errors,
+    TypeId ty,
+    const std::string& name,
+    Location location
+);
 
 std::optional<TypeId> findMetatableEntry(
-    NotNull<BuiltinTypes> builtinTypes, ErrorVec& errors, TypeId type, const std::string& entry, Location location);
+    NotNull<BuiltinTypes> builtinTypes,
+    ErrorVec& errors,
+    TypeId type,
+    const std::string& entry,
+    Location location
+);
 std::optional<TypeId> findTablePropertyRespectingMeta(
-    NotNull<BuiltinTypes> builtinTypes, ErrorVec& errors, TypeId ty, const std::string& name, Location location);
+    NotNull<BuiltinTypes> builtinTypes,
+    ErrorVec& errors,
+    TypeId ty,
+    const std::string& name,
+    Location location
+);
 std::optional<TypeId> findTablePropertyRespectingMeta(
-    NotNull<BuiltinTypes> builtinTypes, ErrorVec& errors, TypeId ty, const std::string& name, ValueContext context, Location location);
+    NotNull<BuiltinTypes> builtinTypes,
+    ErrorVec& errors,
+    TypeId ty,
+    const std::string& name,
+    ValueContext context,
+    Location location
+);
 
 bool occursCheck(TypeId needle, TypeId haystack);
 
@@ -73,7 +94,12 @@ std::pair<size_t, std::optional<size_t>> getParameterExtents(const TxnLog* log, 
 // Extend the provided pack to at least `length` types.
 // Returns a temporary TypePack that contains those types plus a tail.
 TypePack extendTypePack(
-    TypeArena& arena, NotNull<BuiltinTypes> builtinTypes, TypePackId pack, size_t length, std::vector<std::optional<TypeId>> overrides = {});
+    TypeArena& arena,
+    NotNull<BuiltinTypes> builtinTypes,
+    TypePackId pack,
+    size_t length,
+    std::vector<std::optional<TypeId>> overrides = {}
+);
 
 /**
  * Reduces a union by decomposing to the any/error type if it appears in the
@@ -221,5 +247,46 @@ std::optional<Ty> follow(std::optional<Ty> ty)
     else
         return std::nullopt;
 }
+
+/**
+ * Returns whether or not expr is a literal expression, for example:
+ * - Scalar literals (numbers, booleans, strings, nil)
+ * - Table literals
+ * - Lambdas (a "function literal")
+ */
+bool isLiteral(const AstExpr* expr);
+
+/**
+ * Given a table literal and a mapping from expression to type, determine
+ * whether any literal expression in this table depends on any blocked types.
+ * This is used as a precondition for bidirectional inference: be warned that
+ * the behavior of this algorithm is tightly coupled to that of bidirectional
+ * inference.
+ * @param expr Expression to search
+ * @param astTypes Mapping from AST node to TypeID
+ * @returns A vector of blocked types
+ */
+std::vector<TypeId> findBlockedTypesIn(AstExprTable* expr, NotNull<DenseHashMap<const AstExpr*, TypeId>> astTypes);
+
+/**
+ * Given a function call and a mapping from expression to type, determine
+ * whether the type of any argument in said call in depends on a blocked types.
+ * This is used as a precondition for bidirectional inference: be warned that
+ * the behavior of this algorithm is tightly coupled to that of bidirectional
+ * inference.
+ * @param expr Expression to search
+ * @param astTypes Mapping from AST node to TypeID
+ * @returns A vector of blocked types
+ */
+std::vector<TypeId> findBlockedArgTypesIn(AstExprCall* expr, NotNull<DenseHashMap<const AstExpr*, TypeId>> astTypes);
+
+/**
+ * Given a scope and a free type, find the closest parent that has a present
+ * `interiorFreeTypes` and append the given type to said list. This list will
+ * be generalized when the requiste `GeneralizationConstraint` is resolved.
+ * @param scope Initial scope this free type was attached to
+ * @param ty Free type to track.
+ */
+void trackInteriorFreeType(Scope* scope, TypeId ty);
 
 } // namespace Luau

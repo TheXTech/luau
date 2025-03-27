@@ -7,6 +7,8 @@
 #include <stdarg.h>
 #include <stdio.h>
 
+LUAU_FASTFLAG(LuauVectorLibNativeDot);
+
 namespace Luau
 {
 namespace CodeGen
@@ -17,8 +19,8 @@ namespace A64
 static const uint8_t codeForCondition[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14};
 static_assert(sizeof(codeForCondition) / sizeof(codeForCondition[0]) == size_t(ConditionA64::Count), "all conditions have to be covered");
 
-static const char* textForCondition[] = {
-    "b.eq", "b.ne", "b.cs", "b.cc", "b.mi", "b.pl", "b.vs", "b.vc", "b.hi", "b.ls", "b.ge", "b.lt", "b.gt", "b.le", "b.al"};
+static const char* textForCondition[] =
+    {"b.eq", "b.ne", "b.cs", "b.cc", "b.mi", "b.pl", "b.vs", "b.vc", "b.hi", "b.ls", "b.ge", "b.lt", "b.gt", "b.le", "b.al"};
 static_assert(sizeof(textForCondition) / sizeof(textForCondition[0]) == size_t(ConditionA64::Count), "all conditions have to be covered");
 
 const unsigned kMaxAlign = 32;
@@ -586,6 +588,15 @@ void AssemblyBuilderA64::fabs(RegisterA64 dst, RegisterA64 src)
     placeR1("fabs", dst, src, 0b000'11110'01'1'0000'01'10000);
 }
 
+void AssemblyBuilderA64::faddp(RegisterA64 dst, RegisterA64 src)
+{
+    LUAU_ASSERT(FFlag::LuauVectorLibNativeDot);
+    CODEGEN_ASSERT(dst.kind == KindA64::d || dst.kind == KindA64::s);
+    CODEGEN_ASSERT(dst.kind == src.kind);
+
+    placeR1("faddp", dst, src, 0b011'11110'0'0'11000'01101'10 | ((dst.kind == KindA64::d) << 12));
+}
+
 void AssemblyBuilderA64::fadd(RegisterA64 dst, RegisterA64 src1, RegisterA64 src2)
 {
     if (dst.kind == KindA64::d)
@@ -968,8 +979,10 @@ void AssemblyBuilderA64::placeSR3(const char* name, RegisterA64 dst, RegisterA64
 
     uint32_t sf = (dst.kind == KindA64::x) ? 0x80000000 : 0;
 
-    place(dst.index | (src1.index << 5) | ((shift < 0 ? -shift : shift) << 10) | (src2.index << 16) | (N << 21) | (int(shift < 0) << 22) |
-          (op << 24) | sf);
+    place(
+        dst.index | (src1.index << 5) | ((shift < 0 ? -shift : shift) << 10) | (src2.index << 16) | (N << 21) | (int(shift < 0) << 22) | (op << 24) |
+        sf
+    );
     commit();
 }
 
@@ -1173,7 +1186,15 @@ void AssemblyBuilderA64::placeP(const char* name, RegisterA64 src1, RegisterA64 
 }
 
 void AssemblyBuilderA64::placeCS(
-    const char* name, RegisterA64 dst, RegisterA64 src1, RegisterA64 src2, ConditionA64 cond, uint8_t op, uint8_t opc, int invert)
+    const char* name,
+    RegisterA64 dst,
+    RegisterA64 src1,
+    RegisterA64 src2,
+    ConditionA64 cond,
+    uint8_t op,
+    uint8_t opc,
+    int invert
+)
 {
     if (logText)
         log(name, dst, src1, src2, cond);

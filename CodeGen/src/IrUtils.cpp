@@ -1,6 +1,7 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/IrUtils.h"
 
+#include "Luau/CodeGenOptions.h"
 #include "Luau/IrBuilder.h"
 
 #include "BitUtils.h"
@@ -9,8 +10,13 @@
 #include "lua.h"
 #include "lnumutils.h"
 
+#include <algorithm>
+#include <vector>
+
 #include <limits.h>
 #include <math.h>
+
+LUAU_FASTFLAG(LuauVectorLibNativeDot);
 
 namespace Luau
 {
@@ -68,6 +74,7 @@ IrValueKind getCmdValueKind(IrCmd cmd)
     case IrCmd::SQRT_NUM:
     case IrCmd::ABS_NUM:
     case IrCmd::SIGN_NUM:
+    case IrCmd::SELECT_NUM:
         return IrValueKind::Double;
     case IrCmd::ADD_VEC:
     case IrCmd::SUB_VEC:
@@ -75,6 +82,9 @@ IrValueKind getCmdValueKind(IrCmd cmd)
     case IrCmd::DIV_VEC:
     case IrCmd::UNM_VEC:
         return IrValueKind::Tvalue;
+    case IrCmd::DOT_VEC:
+        LUAU_ASSERT(FFlag::LuauVectorLibNativeDot);
+        return IrValueKind::Double;
     case IrCmd::NOT_ANY:
     case IrCmd::CMP_ANY:
         return IrValueKind::Int;
@@ -651,6 +661,15 @@ void foldConstants(IrBuilder& build, IrFunction& function, IrBlock& block, uint3
             substitute(function, inst, build.constDouble(v > 0.0 ? 1.0 : v < 0.0 ? -1.0 : 0.0));
         }
         break;
+    case IrCmd::SELECT_NUM:
+        if (inst.c.kind == IrOpKind::Constant && inst.d.kind == IrOpKind::Constant)
+        {
+            double c = function.doubleOp(inst.c);
+            double d = function.doubleOp(inst.d);
+
+            substitute(function, inst, c == d ? inst.b : inst.a);
+        }
+        break;
     case IrCmd::NOT_ANY:
         if (inst.a.kind == IrOpKind::Constant)
         {
@@ -963,21 +982,26 @@ std::vector<uint32_t> getSortedBlockOrder(IrFunction& function)
     for (uint32_t i = 0; i < function.blocks.size(); i++)
         sortedBlocks.push_back(i);
 
-    std::sort(sortedBlocks.begin(), sortedBlocks.end(), [&](uint32_t idxA, uint32_t idxB) {
-        const IrBlock& a = function.blocks[idxA];
-        const IrBlock& b = function.blocks[idxB];
+    std::sort(
+        sortedBlocks.begin(),
+        sortedBlocks.end(),
+        [&](uint32_t idxA, uint32_t idxB)
+        {
+            const IrBlock& a = function.blocks[idxA];
+            const IrBlock& b = function.blocks[idxB];
 
-        // Place fallback blocks at the end
-        if ((a.kind == IrBlockKind::Fallback) != (b.kind == IrBlockKind::Fallback))
-            return (a.kind == IrBlockKind::Fallback) < (b.kind == IrBlockKind::Fallback);
+            // Place fallback blocks at the end
+            if ((a.kind == IrBlockKind::Fallback) != (b.kind == IrBlockKind::Fallback))
+                return (a.kind == IrBlockKind::Fallback) < (b.kind == IrBlockKind::Fallback);
 
-        // Try to order by instruction order
-        if (a.sortkey != b.sortkey)
-            return a.sortkey < b.sortkey;
+            // Try to order by instruction order
+            if (a.sortkey != b.sortkey)
+                return a.sortkey < b.sortkey;
 
-        // Chains of blocks are merged together by having the same sort key and consecutive chain key
-        return a.chainkey < b.chainkey;
-    });
+            // Chains of blocks are merged together by having the same sort key and consecutive chain key
+            return a.chainkey < b.chainkey;
+        }
+    );
 
     return sortedBlocks;
 }

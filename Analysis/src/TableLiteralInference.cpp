@@ -1,21 +1,22 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 
+#include "Luau/TableLiteralInference.h"
+
 #include "Luau/Ast.h"
+#include "Luau/Common.h"
 #include "Luau/Normalize.h"
 #include "Luau/Simplify.h"
+#include "Luau/Subtyping.h"
 #include "Luau/Type.h"
 #include "Luau/ToString.h"
 #include "Luau/TypeArena.h"
+#include "Luau/TypeUtils.h"
 #include "Luau/Unifier2.h"
+
+LUAU_FASTFLAGVARIABLE(LuauBidirectionalInferenceUpcast)
 
 namespace Luau
 {
-
-static bool isLiteral(const AstExpr* expr)
-{
-    return (expr->is<AstExprTable>() || expr->is<AstExprFunction>() || expr->is<AstExprConstantNumber>() || expr->is<AstExprConstantString>() ||
-            expr->is<AstExprConstantBool>() || expr->is<AstExprConstantNil>());
-}
 
 // A fast approximation of subTy <: superTy
 static bool fastIsSubtype(TypeId subTy, TypeId superTy)
@@ -108,9 +109,18 @@ static std::optional<TypeId> extractMatchingTableType(std::vector<TypeId>& table
     return std::nullopt;
 }
 
-TypeId matchLiteralType(NotNull<DenseHashMap<const AstExpr*, TypeId>> astTypes, NotNull<DenseHashMap<const AstExpr*, TypeId>> astExpectedTypes,
-    NotNull<BuiltinTypes> builtinTypes, NotNull<TypeArena> arena, NotNull<Unifier2> unifier, TypeId expectedType, TypeId exprType,
-    const AstExpr* expr, std::vector<TypeId>& toBlock)
+TypeId matchLiteralType(
+    NotNull<DenseHashMap<const AstExpr*, TypeId>> astTypes,
+    NotNull<DenseHashMap<const AstExpr*, TypeId>> astExpectedTypes,
+    NotNull<BuiltinTypes> builtinTypes,
+    NotNull<TypeArena> arena,
+    NotNull<Unifier2> unifier,
+    NotNull<Subtyping> subtyping,
+    TypeId expectedType,
+    TypeId exprType,
+    const AstExpr* expr,
+    std::vector<TypeId>& toBlock
+)
 {
     /*
      * Table types that arise from literal table expressions have some
@@ -127,7 +137,17 @@ TypeId matchLiteralType(NotNull<DenseHashMap<const AstExpr*, TypeId>> astTypes, 
      * by the expected type.
      */
     if (!isLiteral(expr))
-        return exprType;
+    {
+        if (FFlag::LuauBidirectionalInferenceUpcast)
+        {
+            auto result = subtyping->isSubtype(/*subTy=*/exprType, /*superTy=*/expectedType, unifier->scope);
+            return result.isSubtype
+                ? expectedType
+                : exprType;
+        }
+        else
+            return exprType;
+    }
 
     expectedType = follow(expectedType);
     exprType = follow(exprType);
@@ -204,11 +224,20 @@ TypeId matchLiteralType(NotNull<DenseHashMap<const AstExpr*, TypeId>> astTypes, 
         return exprType;
     }
 
-    // TODO: lambdas
+
+    if (FFlag::LuauBidirectionalInferenceUpcast && expr->is<AstExprFunction>())
+    {
+        // TODO: Push argument / return types into the lambda. For now, just do 
+        // the non-literal thing: check for a subtype and upcast if valid.
+        auto result = subtyping->isSubtype(/*subTy=*/exprType, /*superTy=*/expectedType, unifier->scope);
+        return result.isSubtype 
+            ? expectedType
+            : exprType;
+    }
 
     if (auto exprTable = expr->as<AstExprTable>())
     {
-        TableType* tableTy = getMutable<TableType>(exprType);
+        TableType* const tableTy = getMutable<TableType>(exprType);
         LUAU_ASSERT(tableTy);
 
         const TableType* expectedTableTy = get<TableType>(expectedType);
@@ -223,7 +252,7 @@ TypeId matchLiteralType(NotNull<DenseHashMap<const AstExpr*, TypeId>> astTypes, 
 
                 if (tt)
                 {
-                    TypeId res = matchLiteralType(astTypes, astExpectedTypes, builtinTypes, arena, unifier, *tt, exprType, expr, toBlock);
+                    TypeId res = matchLiteralType(astTypes, astExpectedTypes, builtinTypes, arena, unifier, subtyping, *tt, exprType, expr, toBlock);
 
                     parts.push_back(res);
                     return arena->addType(UnionType{std::move(parts)});
@@ -232,6 +261,8 @@ TypeId matchLiteralType(NotNull<DenseHashMap<const AstExpr*, TypeId>> astTypes, 
 
             return exprType;
         }
+
+        DenseHashSet<AstExprConstantString*> keysToDelete{nullptr};
 
         for (const AstExprTable::Item& item : exprTable->items)
         {
@@ -244,8 +275,11 @@ TypeId matchLiteralType(NotNull<DenseHashMap<const AstExpr*, TypeId>> astTypes, 
 
                 Property& prop = it->second;
 
-                // Table literals always initially result in shared read-write types
-                LUAU_ASSERT(prop.isShared());
+                // If we encounter a duplcate property, we may have already
+                // set it to be read-only. If that's the case, the only thing
+                // that will definitely crash is trying to access a write
+                // only property.
+                LUAU_ASSERT(!prop.isWriteOnly());
                 TypeId propTy = *prop.readTy;
 
                 auto it2 = expectedTableTy->props.find(keyStr);
@@ -260,15 +294,26 @@ TypeId matchLiteralType(NotNull<DenseHashMap<const AstExpr*, TypeId>> astTypes, 
                         (*astExpectedTypes)[item.key] = expectedTableTy->indexer->indexType;
                         (*astExpectedTypes)[item.value] = expectedTableTy->indexer->indexResultType;
 
-                        TypeId matchedType = matchLiteralType(astTypes, astExpectedTypes, builtinTypes, arena, unifier,
-                            expectedTableTy->indexer->indexResultType, propTy, item.value, toBlock);
+                        TypeId matchedType = matchLiteralType(
+                            astTypes,
+                            astExpectedTypes,
+                            builtinTypes,
+                            arena,
+                            unifier,
+                            subtyping,
+                            expectedTableTy->indexer->indexResultType,
+                            propTy,
+                            item.value,
+                            toBlock
+                        );
 
                         if (tableTy->indexer)
                             unifier->unify(matchedType, tableTy->indexer->indexResultType);
                         else
                             tableTy->indexer = TableIndexer{expectedTableTy->indexer->indexType, matchedType};
 
-                        tableTy->props.erase(keyStr);
+                        keysToDelete.insert(item.key->as<AstExprConstantString>());
+
                     }
 
                     // If it's just an extra property and the expected type
@@ -292,21 +337,21 @@ TypeId matchLiteralType(NotNull<DenseHashMap<const AstExpr*, TypeId>> astTypes, 
                 if (expectedProp.isShared())
                 {
                     matchedType =
-                        matchLiteralType(astTypes, astExpectedTypes, builtinTypes, arena, unifier, *expectedReadTy, propTy, item.value, toBlock);
+                        matchLiteralType(astTypes, astExpectedTypes, builtinTypes, arena, unifier, subtyping, *expectedReadTy, propTy, item.value, toBlock);
                     prop.readTy = matchedType;
                     prop.writeTy = matchedType;
                 }
                 else if (expectedReadTy)
                 {
                     matchedType =
-                        matchLiteralType(astTypes, astExpectedTypes, builtinTypes, arena, unifier, *expectedReadTy, propTy, item.value, toBlock);
+                        matchLiteralType(astTypes, astExpectedTypes, builtinTypes, arena, unifier, subtyping, *expectedReadTy, propTy, item.value, toBlock);
                     prop.readTy = matchedType;
                     prop.writeTy.reset();
                 }
                 else if (expectedWriteTy)
                 {
                     matchedType =
-                        matchLiteralType(astTypes, astExpectedTypes, builtinTypes, arena, unifier, *expectedWriteTy, propTy, item.value, toBlock);
+                        matchLiteralType(astTypes, astExpectedTypes, builtinTypes, arena, unifier, subtyping, *expectedWriteTy, propTy, item.value, toBlock);
                     prop.readTy.reset();
                     prop.writeTy = matchedType;
                 }
@@ -334,8 +379,18 @@ TypeId matchLiteralType(NotNull<DenseHashMap<const AstExpr*, TypeId>> astTypes, 
                     LUAU_ASSERT(propTy);
 
                     unifier->unify(expectedTableTy->indexer->indexType, builtinTypes->numberType);
-                    TypeId matchedType = matchLiteralType(astTypes, astExpectedTypes, builtinTypes, arena, unifier,
-                        expectedTableTy->indexer->indexResultType, *propTy, item.value, toBlock);
+                    TypeId matchedType = matchLiteralType(
+                        astTypes,
+                        astExpectedTypes,
+                        builtinTypes,
+                        arena,
+                        unifier,
+                        subtyping,
+                        expectedTableTy->indexer->indexResultType,
+                        *propTy,
+                        item.value,
+                        toBlock
+                    );
 
                     // if the index result type is the prop type, we can replace it with the matched type here.
                     if (tableTy->indexer->indexResultType == *propTy)
@@ -353,17 +408,24 @@ TypeId matchLiteralType(NotNull<DenseHashMap<const AstExpr*, TypeId>> astTypes, 
                 const TypeId* keyTy = astTypes->find(item.key);
                 LUAU_ASSERT(keyTy);
                 TypeId tKey = follow(*keyTy);
-                if (get<BlockedType>(tKey))
-                    toBlock.push_back(tKey);
-
+                LUAU_ASSERT(!is<BlockedType>(tKey));
                 const TypeId* propTy = astTypes->find(item.value);
                 LUAU_ASSERT(propTy);
                 TypeId tProp = follow(*propTy);
-                if (get<BlockedType>(tProp))
-                    toBlock.push_back(tProp);
+                LUAU_ASSERT(!is<BlockedType>(tProp));
+                // Populate expected types for non-string keys declared with [] (the code below will handle the case where they are strings)
+                if (!item.key->as<AstExprConstantString>() && expectedTableTy->indexer)
+                    (*astExpectedTypes)[item.key] = expectedTableTy->indexer->indexType;
             }
             else
                 LUAU_ASSERT(!"Unexpected");
+        }
+
+        for (const auto& key : keysToDelete)
+        {
+            const AstArray<char>& s = key->value;
+            std::string keyStr{s.data, s.data + s.size};
+            tableTy->props.erase(keyStr);
         }
 
         // Keys that the expectedType says we should have, but that aren't
@@ -409,6 +471,15 @@ TypeId matchLiteralType(NotNull<DenseHashMap<const AstExpr*, TypeId>> astTypes, 
             // If the property isn't actually optional, do nothing.
             if (exprProp.readTy || exprProp.writeTy)
                 tableTy->props[*key] = std::move(exprProp);
+        }
+
+        // If the expected table has an indexer, then the provided table can
+        // have one too.
+        // TODO: If the expected table also has an indexer, we might want to
+        // push the expected indexer's types into it.
+        if (expectedTableTy->indexer && !tableTy->indexer)
+        {
+            tableTy->indexer = expectedTableTy->indexer;
         }
     }
 

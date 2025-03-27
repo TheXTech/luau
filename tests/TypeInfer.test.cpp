@@ -16,14 +16,20 @@
 
 #include <algorithm>
 
-LUAU_FASTFLAG(LuauFixLocationSpanTableIndexExpr);
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
-LUAU_FASTFLAG(LuauInstantiateInSubtyping);
-LUAU_FASTFLAG(LuauLeadingBarAndAmpersand2)
-LUAU_FASTINT(LuauCheckRecursionLimit);
-LUAU_FASTINT(LuauNormalizeCacheLimit);
-LUAU_FASTINT(LuauRecursionLimit);
-LUAU_FASTINT(LuauTypeInferRecursionLimit);
+LUAU_FASTFLAG(LuauFixLocationSpanTableIndexExpr)
+LUAU_FASTFLAG(LuauSolverV2)
+LUAU_FASTFLAG(LuauInstantiateInSubtyping)
+LUAU_FASTINT(LuauCheckRecursionLimit)
+LUAU_FASTFLAG(LuauGlobalSelfAssignmentCycle)
+LUAU_FASTINT(LuauNormalizeCacheLimit)
+LUAU_FASTINT(LuauRecursionLimit)
+LUAU_FASTINT(LuauTypeInferRecursionLimit)
+LUAU_FASTFLAG(LuauAstTypeGroup3)
+LUAU_FASTFLAG(LuauNewNonStrictWarnOnUnknownGlobals)
+LUAU_FASTFLAG(LuauInferLocalTypesInMultipleAssignments)
+LUAU_FASTFLAG(LuauUnifyMetatableWithAny)
+LUAU_FASTFLAG(LuauExtraFollows)
+LUAU_FASTFLAG(LuauImproveTypePathsInErrors)
 
 using namespace Luau;
 
@@ -50,7 +56,7 @@ TEST_CASE_FIXTURE(Fixture, "tc_error")
 {
     CheckResult result = check("local a = 7   local b = 'hi'   a = b");
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
+    if (FFlag::LuauSolverV2)
     {
         LUAU_REQUIRE_NO_ERRORS(result);
         CHECK("number | string" == toString(requireType("a")));
@@ -59,8 +65,10 @@ TEST_CASE_FIXTURE(Fixture, "tc_error")
     {
         LUAU_REQUIRE_ERROR_COUNT(1, result);
 
-        CHECK_EQ(result.errors[0],
-            (TypeError{Location{Position{0, 35}, Position{0, 36}}, TypeMismatch{builtinTypes->numberType, builtinTypes->stringType}}));
+        CHECK_EQ(
+            result.errors[0],
+            (TypeError{Location{Position{0, 35}, Position{0, 36}}, TypeMismatch{builtinTypes->numberType, builtinTypes->stringType}})
+        );
     }
 }
 
@@ -68,7 +76,7 @@ TEST_CASE_FIXTURE(Fixture, "tc_error_2")
 {
     CheckResult result = check("local a = 7   a = 'hi'");
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
+    if (FFlag::LuauSolverV2)
     {
         LUAU_REQUIRE_NO_ERRORS(result);
         CHECK("number | string" == toString(requireType("a")));
@@ -77,10 +85,16 @@ TEST_CASE_FIXTURE(Fixture, "tc_error_2")
     {
         LUAU_REQUIRE_ERROR_COUNT(1, result);
 
-        CHECK_EQ(result.errors[0], (TypeError{Location{Position{0, 18}, Position{0, 22}}, TypeMismatch{
-                                                                                              requireType("a"),
-                                                                                              builtinTypes->stringType,
-                                                                                          }}));
+        CHECK_EQ(
+            result.errors[0],
+            (TypeError{
+                Location{Position{0, 18}, Position{0, 22}},
+                TypeMismatch{
+                    requireType("a"),
+                    builtinTypes->stringType,
+                }
+            })
+        );
     }
 }
 
@@ -89,7 +103,7 @@ TEST_CASE_FIXTURE(Fixture, "infer_locals_with_nil_value")
     CheckResult result = check("local f = nil; f = 'hello world'");
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
+    if (FFlag::LuauSolverV2)
     {
         CHECK("string?" == toString(requireType("f")));
     }
@@ -121,7 +135,7 @@ TEST_CASE_FIXTURE(Fixture, "infer_locals_via_assignment_from_its_call_site")
         f("foo")
     )");
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
+    if (FFlag::LuauSolverV2)
     {
         CHECK("unknown" == toString(requireType("a")));
         CHECK("(unknown) -> ()" == toString(requireType("f")));
@@ -138,9 +152,7 @@ TEST_CASE_FIXTURE(Fixture, "infer_locals_via_assignment_from_its_call_site")
 
 TEST_CASE_FIXTURE(Fixture, "infer_in_nocheck_mode")
 {
-    ScopedFastFlag sff[]{
-        {FFlag::DebugLuauDeferredConstraintResolution, false},
-    };
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
 
     CheckResult result = check(R"(
         --!nocheck
@@ -187,7 +199,7 @@ TEST_CASE_FIXTURE(Fixture, "if_statement")
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
+    if (FFlag::LuauSolverV2)
     {
         CHECK("string?" == toString(requireType("a")));
         CHECK("number?" == toString(requireType("b")));
@@ -217,6 +229,8 @@ TEST_CASE_FIXTURE(Fixture, "statements_are_topologically_sorted")
 
 TEST_CASE_FIXTURE(Fixture, "unify_nearly_identical_recursive_types")
 {
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
     CheckResult result = check(R"(
         local o
         o:method()
@@ -256,6 +270,8 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "weird_case")
 
 TEST_CASE_FIXTURE(Fixture, "dont_ice_when_failing_the_occurs_check")
 {
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
     CheckResult result = check(R"(
         --!strict
         local s
@@ -307,7 +323,7 @@ TEST_CASE_FIXTURE(Fixture, "type_errors_infer_types")
     CHECK_EQ("x", err->key);
 
     // TODO: Should we assert anything about these tests when DCR is being used?
-    if (!FFlag::DebugLuauDeferredConstraintResolution)
+    if (!FFlag::LuauSolverV2)
     {
         CHECK_EQ("*error-type*", toString(requireType("c")));
         CHECK_EQ("*error-type*", toString(requireType("d")));
@@ -373,6 +389,8 @@ TEST_CASE_FIXTURE(Fixture, "exponential_blowup_from_copying_types")
 // checker. We also want it to somewhat match up with production values, so we push up the parser recursion limit a little bit instead.
 TEST_CASE_FIXTURE(Fixture, "check_type_infer_recursion_count")
 {
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
 #if defined(LUAU_ENABLE_ASAN)
     int limit = 250;
 #elif defined(_DEBUG) || defined(_NOOPT)
@@ -428,6 +446,9 @@ TEST_CASE_FIXTURE(Fixture, "check_expr_recursion_limit")
 
 TEST_CASE_FIXTURE(Fixture, "globals")
 {
+    // The new solver does not permit assignments to globals like this.
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
     CheckResult result = check(R"(
         --!nonstrict
         foo = true
@@ -440,6 +461,8 @@ TEST_CASE_FIXTURE(Fixture, "globals")
 
 TEST_CASE_FIXTURE(Fixture, "globals2")
 {
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
     CheckResult result = check(R"(
         --!nonstrict
         foo = function() return 1 end
@@ -488,6 +511,8 @@ TEST_CASE_FIXTURE(Fixture, "correctly_scope_locals_do")
 
 TEST_CASE_FIXTURE(Fixture, "checking_should_not_ice")
 {
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
     CHECK_NOTHROW(check(R"(
         --!nonstrict
         f,g = ...
@@ -580,6 +605,8 @@ TEST_CASE_FIXTURE(Fixture, "tc_after_error_recovery_no_assert")
 TEST_CASE_FIXTURE(BuiltinsFixture, "tc_after_error_recovery_no_replacement_name_in_error")
 {
     {
+        DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
         CheckResult result = check(R"(
             --!strict
             local t = { x = 10, y = 20 }
@@ -600,6 +627,8 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "tc_after_error_recovery_no_replacement_name_
     }
 
     {
+        DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
         CheckResult result = check(R"(
             --!strict
             function string.() end
@@ -673,6 +702,8 @@ TEST_CASE_FIXTURE(Fixture, "cli_39932_use_unifier_in_ensure_methods")
 
 TEST_CASE_FIXTURE(Fixture, "dont_report_type_errors_within_an_AstStatError")
 {
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
     CheckResult result = check(R"(
         foo
     )");
@@ -682,6 +713,8 @@ TEST_CASE_FIXTURE(Fixture, "dont_report_type_errors_within_an_AstStatError")
 
 TEST_CASE_FIXTURE(Fixture, "dont_report_type_errors_within_an_AstExprError")
 {
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
     CheckResult result = check(R"(
         local a = foo:
     )");
@@ -731,11 +764,19 @@ TEST_CASE_FIXTURE(Fixture, "no_stack_overflow_from_isoptional")
     std::optional<TypeId> t0 = lookupType("t0");
     REQUIRE(t0);
 
-    CHECK_EQ("*error-type*", toString(*t0));
+    if (FFlag::LuauSolverV2)
+        CHECK("any" == toString(*t0));
+    else
+        CHECK_EQ("*error-type*", toString(*t0));
 
-    auto it = std::find_if(result.errors.begin(), result.errors.end(), [](TypeError& err) {
-        return get<OccursCheckFailed>(err);
-    });
+    auto it = std::find_if(
+        result.errors.begin(),
+        result.errors.end(),
+        [](TypeError& err)
+        {
+            return get<OccursCheckFailed>(err);
+        }
+    );
     CHECK(it != result.errors.end());
 }
 
@@ -783,7 +824,7 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "no_heap_use_after_free_error")
         end
     )");
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
+    if (FFlag::LuauSolverV2 && !FFlag::LuauNewNonStrictWarnOnUnknownGlobals)
         LUAU_REQUIRE_NO_ERRORS(result);
     else
         LUAU_REQUIRE_ERRORS(result);
@@ -841,7 +882,7 @@ TEST_CASE_FIXTURE(Fixture, "tc_if_else_expressions1")
     CheckResult result = check(R"(local a = if true then "true" else "false")");
     LUAU_REQUIRE_NO_ERRORS(result);
     TypeId aType = requireType("a");
-    CHECK_EQ(getPrimitiveType(aType), PrimitiveType::String);
+    CHECK("string" == toString(aType));
 }
 
 TEST_CASE_FIXTURE(Fixture, "tc_if_else_expressions2")
@@ -852,7 +893,7 @@ local a = if false then "a" elseif false then "b" else "c"
     )");
     LUAU_REQUIRE_NO_ERRORS(result);
     TypeId aType = requireType("a");
-    CHECK_EQ(getPrimitiveType(aType), PrimitiveType::String);
+    CHECK("string" == toString(aType));
 }
 
 TEST_CASE_FIXTURE(Fixture, "tc_if_else_expressions_type_union")
@@ -1063,6 +1104,8 @@ end
 
 TEST_CASE_FIXTURE(Fixture, "cli_50041_committing_txnlog_in_apollo_client_error")
 {
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
     CheckResult result = check(R"(
         --!strict
         --!nolint
@@ -1092,7 +1135,29 @@ TEST_CASE_FIXTURE(Fixture, "cli_50041_committing_txnlog_in_apollo_client_error")
         end
     )");
 
-    if (FFlag::LuauInstantiateInSubtyping)
+    if (FFlag::LuauInstantiateInSubtyping && FFlag::LuauImproveTypePathsInErrors)
+    {
+        LUAU_REQUIRE_ERROR_COUNT(1, result);
+        const std::string expected =
+            "Type 'Policies' from 'MainModule' could not be converted into 'Policies' from 'MainModule'"
+            "\ncaused by:\n"
+            "  Property 'getStoreFieldName' is not compatible.\n"
+            "Type\n\t"
+            "'(Policies, FieldSpecifier & {| from: number? |}) -> (a, b...)'"
+            "\ncould not be converted into\n\t"
+            "'(Policies, FieldSpecifier) -> string'"
+            "\ncaused by:\n"
+            "  Argument #2 type is not compatible.\n"
+            "Type\n\t"
+            "'FieldSpecifier'"
+            "\ncould not be converted into\n\t"
+            "'FieldSpecifier & {| from: number? |}'"
+            "\ncaused by:\n"
+            "  Not all intersection parts are compatible.\n"
+            "Table type 'FieldSpecifier' not compatible with type '{| from: number? |}' because the former has extra field 'fieldName'";
+        CHECK_EQ(expected, toString(result.errors[0]));
+    }
+    else if (FFlag::LuauInstantiateInSubtyping)
     {
         // though this didn't error before the flag, it seems as though it should error since fields of a table are invariant.
         // the user's intent would likely be that these "method" fields would be read-only, but without an annotation, accepting this should be
@@ -1138,7 +1203,11 @@ TEST_CASE_FIXTURE(Fixture, "type_infer_recursion_limit_no_ice")
     )");
 
     LUAU_REQUIRE_ERRORS(result);
-    CHECK_EQ("Code is too complex to typecheck! Consider simplifying the code around this area", toString(result.errors[0]));
+
+    if (FFlag::LuauSolverV2)
+        CHECK("Type contains a self-recursive construct that cannot be resolved" == toString(result.errors[0]));
+    else
+        CHECK_EQ("Code is too complex to typecheck! Consider simplifying the code around this area", toString(result.errors[0]));
 }
 
 TEST_CASE_FIXTURE(Fixture, "type_infer_recursion_limit_normalizer")
@@ -1155,9 +1224,29 @@ TEST_CASE_FIXTURE(Fixture, "type_infer_recursion_limit_normalizer")
     validateErrors(result.errors);
     REQUIRE_MESSAGE(!result.errors.empty(), getErrors(result));
 
-    CHECK(1 == result.errors.size());
-    CHECK(Location{{3, 12}, {3, 46}} == result.errors[0].location);
-    CHECK_EQ("Code is too complex to typecheck! Consider simplifying the code around this area", toString(result.errors[0]));
+    if (FFlag::LuauSolverV2)
+    {
+        CHECK(3 == result.errors.size());
+        if (FFlag::LuauAstTypeGroup3)
+            CHECK(Location{{2, 22}, {2, 42}} == result.errors[0].location);
+        else
+            CHECK(Location{{2, 22}, {2, 41}} == result.errors[0].location);
+        CHECK(Location{{3, 22}, {3, 42}} == result.errors[1].location);
+        if (FFlag::LuauAstTypeGroup3)
+            CHECK(Location{{3, 22}, {3, 41}} == result.errors[2].location);
+        else
+            CHECK(Location{{3, 23}, {3, 40}} == result.errors[2].location);
+        CHECK_EQ("Code is too complex to typecheck! Consider simplifying the code around this area", toString(result.errors[0]));
+        CHECK_EQ("Code is too complex to typecheck! Consider simplifying the code around this area", toString(result.errors[1]));
+        CHECK_EQ("Code is too complex to typecheck! Consider simplifying the code around this area", toString(result.errors[2]));
+    }
+    else
+    {
+        CHECK(1 == result.errors.size());
+
+        CHECK(Location{{3, 12}, {3, 46}} == result.errors[0].location);
+        CHECK_EQ("Code is too complex to typecheck! Consider simplifying the code around this area", toString(result.errors[0]));
+    }
 }
 
 TEST_CASE_FIXTURE(Fixture, "type_infer_cache_limit_normalizer")
@@ -1175,6 +1264,9 @@ TEST_CASE_FIXTURE(Fixture, "type_infer_cache_limit_normalizer")
 
 TEST_CASE_FIXTURE(Fixture, "follow_on_new_types_in_substitution")
 {
+    // CLI-114134
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
     CheckResult result = check(R"(
         local obj = {}
 
@@ -1309,7 +1401,7 @@ end
 TEST_CASE_FIXTURE(Fixture, "dcr_delays_expansion_of_function_containing_blocked_parameter_type")
 {
     ScopedFastFlag sff[] = {
-        {FFlag::DebugLuauDeferredConstraintResolution, true},
+        {FFlag::LuauSolverV2, true},
     };
 
     CheckResult result = check(R"(
@@ -1343,7 +1435,10 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "recursive_function_that_invokes_itself_with_
         end
     )");
 
-    CHECK("<a>(a) -> ()" == toString(requireType("readValue")));
+    if (FFlag::LuauSolverV2)
+        CHECK("(unknown) -> ()" == toString(requireType("readValue")));
+    else
+        CHECK("<a>(a) -> ()" == toString(requireType("readValue")));
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "recursive_function_that_invokes_itself_with_a_refinement_of_its_parameter_2")
@@ -1356,7 +1451,10 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "recursive_function_that_invokes_itself_with_
         end
     )");
 
-    CHECK("(number) -> ()" == toString(requireType("readValue")));
+    if (FFlag::LuauSolverV2)
+        CHECK("(unknown) -> ()" == toString(requireType("readValue")));
+    else
+        CHECK("(number) -> ()" == toString(requireType("readValue")));
 }
 
 /*
@@ -1472,7 +1570,7 @@ TEST_CASE_FIXTURE(Fixture, "promote_tail_type_packs")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "lti_must_record_contributing_locations")
 {
-    ScopedFastFlag sff_DebugLuauDeferredConstraintResolution{FFlag::DebugLuauDeferredConstraintResolution, true};
+    ScopedFastFlag sff_LuauSolverV2{FFlag::LuauSolverV2, true};
 
     CheckResult result = check(R"(
         local function f(a)
@@ -1508,6 +1606,8 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "lti_must_record_contributing_locations")
  */
 TEST_CASE_FIXTURE(BuiltinsFixture, "be_sure_to_use_active_txnlog_when_evaluating_a_variadic_overload")
 {
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
     CheckResult result = check(R"(
         local function concat<T>(target: {T}, ...: {T} | T): {T}
             return (nil :: any) :: {T}
@@ -1558,7 +1658,7 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "bad_iter_metamethod")
         end
     )");
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
+    if (FFlag::LuauSolverV2)
     {
         LUAU_REQUIRE_ERROR_COUNT(1, result);
 
@@ -1575,7 +1675,6 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "bad_iter_metamethod")
 
 TEST_CASE_FIXTURE(Fixture, "leading_bar")
 {
-    ScopedFastFlag sff{FFlag::LuauLeadingBarAndAmpersand2, true};
     CheckResult result = check(R"(
         type Bar = | number
     )");
@@ -1586,7 +1685,6 @@ TEST_CASE_FIXTURE(Fixture, "leading_bar")
 
 TEST_CASE_FIXTURE(Fixture, "leading_bar_question_mark")
 {
-    ScopedFastFlag sff{FFlag::LuauLeadingBarAndAmpersand2, true};
     CheckResult result = check(R"(
         type Bar = |?
     )");
@@ -1598,7 +1696,6 @@ TEST_CASE_FIXTURE(Fixture, "leading_bar_question_mark")
 
 TEST_CASE_FIXTURE(Fixture, "leading_ampersand")
 {
-    ScopedFastFlag sff{FFlag::LuauLeadingBarAndAmpersand2, true};
     CheckResult result = check(R"(
         type Amp = & string
     )");
@@ -1609,7 +1706,6 @@ TEST_CASE_FIXTURE(Fixture, "leading_ampersand")
 
 TEST_CASE_FIXTURE(Fixture, "leading_bar_no_type")
 {
-    ScopedFastFlag sff{FFlag::LuauLeadingBarAndAmpersand2, true};
     CheckResult result = check(R"(
         type Bar = |
     )");
@@ -1621,7 +1717,6 @@ TEST_CASE_FIXTURE(Fixture, "leading_bar_no_type")
 
 TEST_CASE_FIXTURE(Fixture, "leading_ampersand_no_type")
 {
-    ScopedFastFlag sff{FFlag::LuauLeadingBarAndAmpersand2, true};
     CheckResult result = check(R"(
         type Amp = &
     )");
@@ -1629,6 +1724,227 @@ TEST_CASE_FIXTURE(Fixture, "leading_ampersand_no_type")
     LUAU_REQUIRE_ERROR_COUNT(1, result);
     CHECK("Expected type, got <eof>" == toString(result.errors[0]));
     CHECK("*error-type*" == toString(requireTypeAlias("Amp")));
+}
+
+TEST_CASE_FIXTURE(Fixture, "react_lua_follow_free_type_ub")
+{
+    ScopedFastFlag _{FFlag::LuauSolverV2, true};
+
+    LUAU_REQUIRE_NO_ERRORS(check(R"(
+        return function(Roact)
+            local Tree = Roact.Component:extend("Tree")
+
+            function Tree:render()
+                local breadth, components, depth, id, wrap =
+                    self.props.breadth, self.props.components, self.props.depth, self.props.id, self.props.wrap
+                local Box = components.Box
+                if depth == 0 then
+                    Roact.createElement(Box, {})
+                else
+                    Roact.createElement(Tree, {})
+                end
+
+            end
+        end
+    )"));
+}
+
+TEST_CASE_FIXTURE(Fixture, "visit_error_nodes_in_lvalue")
+{
+    ScopedFastFlag _{FFlag::LuauSolverV2, true};
+
+    // This should always fail to parse, but shouldn't assert. Previously this
+    // would assert as we end up _roughly_ parsing this (with a lot of error
+    // nodes) as:
+    //
+    //  do
+    //      x :: T, y = z
+    //  end
+    //
+    // We assume that `T` has some resolved type that is set up during
+    // constraint generation and resolved during constraint solving to
+    // be used during typechecking. We didn't descend into error nodes
+    // in lvalue positions.
+    LUAU_REQUIRE_ERRORS(check(R"(
+        --!strict
+        (::,
+    )"));
+}
+
+TEST_CASE_FIXTURE(Fixture, "avoid_blocking_type_function")
+{
+    ScopedFastFlag _{FFlag::LuauSolverV2, true};
+
+    LUAU_CHECK_NO_ERRORS(check(R"(
+        --!strict
+        local function foo(a : string?)
+            local b = a or ""
+            return b:upper()
+        end
+    )"));
+}
+
+TEST_CASE_FIXTURE(Fixture, "avoid_double_reference_to_free_type")
+{
+    ScopedFastFlag _{FFlag::LuauSolverV2, true};
+
+    LUAU_CHECK_NO_ERRORS(check(R"(
+        --!strict
+        local function wtf(name: string?)
+            local message
+            message = "invalid alternate fiber: " .. (name or "UNNAMED alternate")
+        end
+    )"));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "infer_types_of_globals")
+{
+    ScopedFastFlag sff_LuauSolverV2{FFlag::LuauSolverV2, true};
+
+    CheckResult result = check(R"(
+        --!strict
+        foo = 5
+        print(foo)
+    )");
+
+    CHECK_EQ("number", toString(requireTypeAtPosition({3, 14})));
+
+    REQUIRE_EQ(1, result.errors.size());
+    CHECK_EQ("Unknown global 'foo'", toString(result.errors[0]));
+}
+
+TEST_CASE_FIXTURE(Fixture, "multiple_assignment")
+{
+    ScopedFastFlag sff_LuauSolverV2{FFlag::LuauSolverV2, true};
+    ScopedFastFlag sff_InferLocalTypesInMultipleAssignments{FFlag::LuauInferLocalTypesInMultipleAssignments, true};
+
+    CheckResult result = check(R"(
+        local function requireString(arg: string) end
+        local function requireNumber(arg: number) end
+
+        local function f(): ...number end
+
+        local w: "a", x, y, z = "a", 1, f()
+        requireString(w)
+        requireNumber(x)
+        requireNumber(y)
+        requireNumber(z)
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(Fixture, "fuzz_global_self_assignment")
+{
+    ScopedFastFlag luauGlobalSelfAssignmentCycle{FFlag::LuauGlobalSelfAssignmentCycle, true};
+
+    // Shouldn't assert or crash
+    check(R"(
+        _ = _
+    )");
+}
+
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "getmetatable_works_with_any")
+{
+    ScopedFastFlag _{FFlag::LuauUnifyMetatableWithAny, true};
+
+    LUAU_REQUIRE_NO_ERRORS(check(R"(
+        return {
+            new = function(name: string)
+                local self = newproxy(true) :: any
+
+                getmetatable(self).__tostring = function()
+                    return "Hello, I am " .. name
+                end
+
+                return self
+            end,
+        }
+    )"));
+
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "getmetatable_infer_any_ret")
+{
+    ScopedFastFlag _{FFlag::LuauUnifyMetatableWithAny, true};
+
+    LUAU_REQUIRE_NO_ERRORS(check(R"(
+        local function spooky(x: any)
+            return getmetatable(x)
+        end
+    )"));
+
+    CHECK_EQ("(any) -> any", toString(requireType("spooky")));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "getmetatable_infer_any_param")
+{
+    ScopedFastFlag sffs[] = {
+        {FFlag::LuauSolverV2, true},
+        {FFlag::LuauUnifyMetatableWithAny, true},
+    };
+
+    auto result = check(R"(
+        local function check(x): any
+            return getmetatable(x)
+        end
+    )");
+
+    // CLI-144695: We're leaking the `MT` generic here, this happens regardless
+    // of if `LuauUnifyMetatableWithAny` is set.
+    CHECK_EQ("({ @metatable MT, {+  +} }) -> any", toString(requireType("check")));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "fuzzer_pack_check_missing_follow")
+{
+    ScopedFastFlag luauExtraFollows{FFlag::LuauExtraFollows, true};
+
+    // Shouldn't assert or crash
+    check(R"(
+_ = n255
+function _()
+setmetatable(_)[_[xpcall(_,setmetatable(_,_()))]] /= xpcall(_,_)
+_.n16(_,_)[_[_]] *= _
+end
+    )");
+}
+
+TEST_CASE_FIXTURE(Fixture, "fuzzer_unify_with_free_missing_follow")
+{
+    ScopedFastFlag luauExtraFollows{FFlag::LuauExtraFollows, true};
+
+    // Shouldn't assert or crash
+    check(R"(
+for _ in ... do
+repeat
+local function l0(l0)
+end
+_ = l0["aaaa"]
+repeat
+_ = true,_("")
+_ = _[_]
+until _
+until _
+repeat
+_ = if _ then _,_()
+_ = _[_]
+until _
+end
+    )");
+}
+
+TEST_CASE_FIXTURE(Fixture, "concat_string_with_string_union")
+{
+    ScopedFastFlag _{FFlag::LuauSolverV2, true};
+    LUAU_REQUIRE_NO_ERRORS(check(R"(
+        local function foo(n : number): string return "" end
+        local function bar(n: number, m: string) end
+        local function concat_stuff(x, y)
+            local z = foo(x)
+            bar(y, z)
+        end
+    )"));
 }
 
 TEST_SUITE_END();

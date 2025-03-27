@@ -13,25 +13,41 @@
 namespace Luau
 {
 
-OverloadResolver::OverloadResolver(NotNull<BuiltinTypes> builtinTypes, NotNull<TypeArena> arena, NotNull<Normalizer> normalizer, NotNull<Scope> scope,
-    NotNull<InternalErrorReporter> reporter, NotNull<TypeCheckLimits> limits, Location callLocation)
+OverloadResolver::OverloadResolver(
+    NotNull<BuiltinTypes> builtinTypes,
+    NotNull<TypeArena> arena,
+    NotNull<Simplifier> simplifier,
+    NotNull<Normalizer> normalizer,
+    NotNull<TypeFunctionRuntime> typeFunctionRuntime,
+    NotNull<Scope> scope,
+    NotNull<InternalErrorReporter> reporter,
+    NotNull<TypeCheckLimits> limits,
+    Location callLocation
+)
     : builtinTypes(builtinTypes)
     , arena(arena)
+    , simplifier(simplifier)
     , normalizer(normalizer)
+    , typeFunctionRuntime(typeFunctionRuntime)
     , scope(scope)
     , ice(reporter)
     , limits(limits)
-    , subtyping({builtinTypes, arena, normalizer, ice, scope})
+    , subtyping({builtinTypes, arena, simplifier, normalizer, typeFunctionRuntime, ice})
     , callLoc(callLocation)
 {
 }
 
 std::pair<OverloadResolver::Analysis, TypeId> OverloadResolver::selectOverload(TypeId ty, TypePackId argsPack)
 {
-    auto tryOne = [&](TypeId f) {
+    auto tryOne = [&](TypeId f)
+    {
         if (auto ftv = get<FunctionType>(f))
         {
-            SubtypingResult r = subtyping.isSubtype(argsPack, ftv->argTypes);
+            Subtyping::Variance variance = subtyping.variance;
+            subtyping.variance = Subtyping::Variance::Contravariant;
+            SubtypingResult r = subtyping.isSubtype(argsPack, ftv->argTypes, scope);
+            subtyping.variance = variance;
+
             if (r.isSubtype)
                 return true;
         }
@@ -80,7 +96,7 @@ void OverloadResolver::resolve(TypeId fnTy, const TypePack* args, AstExpr* selfE
 
 std::optional<ErrorVec> OverloadResolver::testIsSubtype(const Location& location, TypeId subTy, TypeId superTy)
 {
-    auto r = subtyping.isSubtype(subTy, superTy);
+    auto r = subtyping.isSubtype(subTy, superTy, scope);
     ErrorVec errors;
 
     if (r.normalizationTooComplex)
@@ -95,6 +111,7 @@ std::optional<ErrorVec> OverloadResolver::testIsSubtype(const Location& location
         case ErrorSuppression::NormalizationFailed:
             errors.emplace_back(location, NormalizationTooComplex{});
             // intentionally fallthrough here since we couldn't prove this was error-suppressing
+            [[fallthrough]];
         case ErrorSuppression::DoNotSuppress:
             errors.emplace_back(location, TypeMismatch{superTy, subTy});
             break;
@@ -109,7 +126,7 @@ std::optional<ErrorVec> OverloadResolver::testIsSubtype(const Location& location
 
 std::optional<ErrorVec> OverloadResolver::testIsSubtype(const Location& location, TypePackId subTy, TypePackId superTy)
 {
-    auto r = subtyping.isSubtype(subTy, superTy);
+    auto r = subtyping.isSubtype(subTy, superTy, scope);
     ErrorVec errors;
 
     if (r.normalizationTooComplex)
@@ -124,6 +141,7 @@ std::optional<ErrorVec> OverloadResolver::testIsSubtype(const Location& location
         case ErrorSuppression::NormalizationFailed:
             errors.emplace_back(location, NormalizationTooComplex{});
             // intentionally fallthrough here since we couldn't prove this was error-suppressing
+            [[fallthrough]];
         case ErrorSuppression::DoNotSuppress:
             errors.emplace_back(location, TypePackMismatch{superTy, subTy});
             break;
@@ -137,7 +155,12 @@ std::optional<ErrorVec> OverloadResolver::testIsSubtype(const Location& location
 }
 
 std::pair<OverloadResolver::Analysis, ErrorVec> OverloadResolver::checkOverload(
-    TypeId fnTy, const TypePack* args, AstExpr* fnLoc, const std::vector<AstExpr*>* argExprs, bool callMetamethodOk)
+    TypeId fnTy,
+    const TypePack* args,
+    AstExpr* fnLoc,
+    const std::vector<AstExpr*>* argExprs,
+    bool callMetamethodOk
+)
 {
     fnTy = follow(fnTy);
 
@@ -173,10 +196,16 @@ bool OverloadResolver::isLiteral(AstExpr* expr)
 }
 
 std::pair<OverloadResolver::Analysis, ErrorVec> OverloadResolver::checkOverload_(
-    TypeId fnTy, const FunctionType* fn, const TypePack* args, AstExpr* fnExpr, const std::vector<AstExpr*>* argExprs)
+    TypeId fnTy,
+    const FunctionType* fn,
+    const TypePack* args,
+    AstExpr* fnExpr,
+    const std::vector<AstExpr*>* argExprs
+)
 {
-    FunctionGraphReductionResult result =
-        reduceTypeFunctions(fnTy, callLoc, TypeFunctionContext{arena, builtinTypes, scope, normalizer, ice, limits}, /*force=*/true);
+    FunctionGraphReductionResult result = reduceTypeFunctions(
+        fnTy, callLoc, TypeFunctionContext{arena, builtinTypes, scope, simplifier, normalizer, typeFunctionRuntime, ice, limits}, /*force=*/true
+    );
     if (!result.errors.empty())
         return {OverloadIsNonviable, result.errors};
 
@@ -184,7 +213,7 @@ std::pair<OverloadResolver::Analysis, ErrorVec> OverloadResolver::checkOverload_
     TypePackId typ = arena->addTypePack(*args);
 
     TypeId prospectiveFunction = arena->addType(FunctionType{typ, builtinTypes->anyTypePack});
-    SubtypingResult sr = subtyping.isSubtype(fnTy, prospectiveFunction);
+    SubtypingResult sr = subtyping.isSubtype(fnTy, prospectiveFunction, scope);
 
     if (sr.isSubtype)
         return {Analysis::Ok, {}};
@@ -208,15 +237,18 @@ std::pair<OverloadResolver::Analysis, ErrorVec> OverloadResolver::checkOverload_
             // function arguments are options, then this function call
             // is ok.
 
-            const size_t firstUnsatisfiedArgument = argExprs->size();
-            const auto [requiredHead, _requiredTail] = flatten(fn->argTypes);
+            const size_t firstUnsatisfiedArgument = args->head.size();
+            const auto [requiredHead, requiredTail] = flatten(fn->argTypes);
+
+            bool isVariadic = requiredTail && Luau::isVariadic(*requiredTail);
 
             // If too many arguments were supplied, this overload
             // definitely does not match.
             if (args->head.size() > requiredHead.size())
             {
                 auto [minParams, optMaxParams] = getParameterExtents(TxnLog::empty(), fn->argTypes);
-                TypeError error{fnExpr->location, CountMismatch{minParams, optMaxParams, args->head.size(), CountMismatch::Arg, false}};
+
+                TypeError error{fnExpr->location, CountMismatch{minParams, optMaxParams, args->head.size(), CountMismatch::Arg, isVariadic}};
 
                 return {Analysis::ArityMismatch, {error}};
             }
@@ -225,10 +257,10 @@ std::pair<OverloadResolver::Analysis, ErrorVec> OverloadResolver::checkOverload_
             // nil, then this overload does not match.
             for (size_t i = firstUnsatisfiedArgument; i < requiredHead.size(); ++i)
             {
-                if (!subtyping.isSubtype(builtinTypes->nilType, requiredHead[i]).isSubtype)
+                if (!subtyping.isSubtype(builtinTypes->nilType, requiredHead[i], scope).isSubtype)
                 {
                     auto [minParams, optMaxParams] = getParameterExtents(TxnLog::empty(), fn->argTypes);
-                    TypeError error{fnExpr->location, CountMismatch{minParams, optMaxParams, args->head.size(), CountMismatch::Arg, false}};
+                    TypeError error{fnExpr->location, CountMismatch{minParams, optMaxParams, args->head.size(), CountMismatch::Arg, isVariadic}};
 
                     return {Analysis::ArityMismatch, {error}};
                 }
@@ -276,6 +308,7 @@ std::pair<OverloadResolver::Analysis, ErrorVec> OverloadResolver::checkOverload_
                 case ErrorSuppression::NormalizationFailed:
                     errors.emplace_back(argLocation, NormalizationTooComplex{});
                     // intentionally fallthrough here since we couldn't prove this was error-suppressing
+                    [[fallthrough]];
                 case ErrorSuppression::DoNotSuppress:
                     // TODO extract location from the SubtypingResult path and argExprs
                     switch (reason.variance)
@@ -373,12 +406,23 @@ void OverloadResolver::add(Analysis analysis, TypeId ty, ErrorVec&& errors)
 
 // we wrap calling the overload resolver in a separate function to reduce overall stack pressure in `solveFunctionCall`.
 // this limits the lifetime of `OverloadResolver`, a large type, to only as long as it is actually needed.
-std::optional<TypeId> selectOverload(NotNull<BuiltinTypes> builtinTypes, NotNull<TypeArena> arena, NotNull<Normalizer> normalizer,
-    NotNull<Scope> scope, NotNull<InternalErrorReporter> iceReporter, NotNull<TypeCheckLimits> limits, const Location& location, TypeId fn,
-    TypePackId argsPack)
+static std::optional<TypeId> selectOverload(
+    NotNull<BuiltinTypes> builtinTypes,
+    NotNull<TypeArena> arena,
+    NotNull<Simplifier> simplifier,
+    NotNull<Normalizer> normalizer,
+    NotNull<TypeFunctionRuntime> typeFunctionRuntime,
+    NotNull<Scope> scope,
+    NotNull<InternalErrorReporter> iceReporter,
+    NotNull<TypeCheckLimits> limits,
+    const Location& location,
+    TypeId fn,
+    TypePackId argsPack
+)
 {
-    OverloadResolver resolver{builtinTypes, arena, normalizer, scope, iceReporter, limits, location};
-    auto [status, overload] = resolver.selectOverload(fn, argsPack);
+    auto resolver =
+        std::make_unique<OverloadResolver>(builtinTypes, arena, simplifier, normalizer, typeFunctionRuntime, scope, iceReporter, limits, location);
+    auto [status, overload] = resolver->selectOverload(fn, argsPack);
 
     if (status == OverloadResolver::Analysis::Ok)
         return overload;
@@ -389,11 +433,22 @@ std::optional<TypeId> selectOverload(NotNull<BuiltinTypes> builtinTypes, NotNull
     return {};
 }
 
-SolveResult solveFunctionCall(NotNull<TypeArena> arena, NotNull<BuiltinTypes> builtinTypes, NotNull<Normalizer> normalizer,
-    NotNull<InternalErrorReporter> iceReporter, NotNull<TypeCheckLimits> limits, NotNull<Scope> scope, const Location& location, TypeId fn,
-    TypePackId argsPack)
+SolveResult solveFunctionCall(
+    NotNull<TypeArena> arena,
+    NotNull<BuiltinTypes> builtinTypes,
+    NotNull<Simplifier> simplifier,
+    NotNull<Normalizer> normalizer,
+    NotNull<TypeFunctionRuntime> typeFunctionRuntime,
+    NotNull<InternalErrorReporter> iceReporter,
+    NotNull<TypeCheckLimits> limits,
+    NotNull<Scope> scope,
+    const Location& location,
+    TypeId fn,
+    TypePackId argsPack
+)
 {
-    std::optional<TypeId> overloadToUse = selectOverload(builtinTypes, arena, normalizer, scope, iceReporter, limits, location, fn, argsPack);
+    std::optional<TypeId> overloadToUse =
+        selectOverload(builtinTypes, arena, simplifier, normalizer, typeFunctionRuntime, scope, iceReporter, limits, location, fn, argsPack);
     if (!overloadToUse)
         return {SolveResult::NoMatchingOverload};
 
@@ -406,9 +461,9 @@ SolveResult solveFunctionCall(NotNull<TypeArena> arena, NotNull<BuiltinTypes> bu
 
     if (!u2.genericSubstitutions.empty() || !u2.genericPackSubstitutions.empty())
     {
-        Instantiation2 instantiation{arena, std::move(u2.genericSubstitutions), std::move(u2.genericPackSubstitutions)};
+        auto instantiation = std::make_unique<Instantiation2>(arena, std::move(u2.genericSubstitutions), std::move(u2.genericPackSubstitutions));
 
-        std::optional<TypePackId> subst = instantiation.substitute(resultPack);
+        std::optional<TypePackId> subst = instantiation->substitute(resultPack);
 
         if (!subst)
             return {SolveResult::CodeTooComplex};

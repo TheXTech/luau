@@ -3,6 +3,7 @@
 
 #include "AstQueryDsl.h"
 #include "Fixture.h"
+#include "Luau/Common.h"
 #include "ScopedFlags.h"
 
 #include "doctest.h"
@@ -11,15 +12,19 @@
 
 using namespace Luau;
 
-LUAU_FASTFLAG(LuauLexerLookaheadRemembersBraceType);
-LUAU_FASTINT(LuauRecursionLimit);
-LUAU_FASTINT(LuauTypeLengthLimit);
-LUAU_FASTINT(LuauParseErrorLimit);
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
-LUAU_FASTFLAG(LuauAttributeSyntax);
-LUAU_FASTFLAG(LuauLeadingBarAndAmpersand2);
-LUAU_FASTFLAG(LuauAttributeSyntaxFunExpr);
-LUAU_FASTFLAG(LuauDeclarationExtraPropData);
+LUAU_FASTINT(LuauRecursionLimit)
+LUAU_FASTINT(LuauTypeLengthLimit)
+LUAU_FASTINT(LuauParseErrorLimit)
+LUAU_FASTFLAG(LuauSolverV2)
+LUAU_FASTFLAG(LuauAllowComplexTypesInGenericParams)
+LUAU_FASTFLAG(LuauErrorRecoveryForTableTypes)
+LUAU_FASTFLAG(LuauFixFunctionNameStartPosition)
+LUAU_FASTFLAG(LuauExtendStatEndPosWithSemicolon)
+LUAU_FASTFLAG(LuauPreserveUnionIntersectionNodeForLeadingTokenSingleType)
+LUAU_FASTFLAG(LuauAstTypeGroup3)
+LUAU_FASTFLAG(LuauFixDoBlockEndLocation)
+LUAU_FASTFLAG(LuauParseOptionalAsNode)
+LUAU_FASTFLAG(LuauParseStringIndexer)
 
 namespace
 {
@@ -39,24 +44,6 @@ struct Counter
 
 int Counter::instanceCount = 0;
 
-// TODO: delete this and replace all other use of this function with matchParseError
-std::string getParseError(const std::string& code)
-{
-    Fixture f;
-
-    try
-    {
-        f.parse(code);
-    }
-    catch (const Luau::ParseErrors& e)
-    {
-        // in general, tests check only the first error
-        return e.getErrors().front().getMessage();
-    }
-
-    throw std::runtime_error("Expected a parse error in '" + code + "'");
-}
-
 } // namespace
 
 TEST_SUITE_BEGIN("AllocatorTests");
@@ -64,7 +51,8 @@ TEST_SUITE_BEGIN("AllocatorTests");
 TEST_CASE("allocator_can_be_moved")
 {
     Counter* c = nullptr;
-    auto inner = [&]() {
+    auto inner = [&]()
+    {
         Luau::Allocator allocator;
         c = allocator.alloc<Counter>();
         Luau::Allocator moved{std::move(allocator)};
@@ -385,7 +373,10 @@ TEST_CASE_FIXTURE(Fixture, "return_type_is_an_intersection_type_if_led_with_one_
 
     AstTypeIntersection* returnAnnotation = annotation->returnTypes.types.data[0]->as<AstTypeIntersection>();
     REQUIRE(returnAnnotation != nullptr);
-    CHECK(returnAnnotation->types.data[0]->as<AstTypeReference>());
+    if (FFlag::LuauAstTypeGroup3)
+        CHECK(returnAnnotation->types.data[0]->as<AstTypeGroup>());
+    else
+        CHECK(returnAnnotation->types.data[0]->as<AstTypeReference>());
     CHECK(returnAnnotation->types.data[1]->as<AstTypeFunction>());
 }
 
@@ -464,46 +455,62 @@ TEST_CASE_FIXTURE(Fixture, "type_alias_span_is_correct")
 
 TEST_CASE_FIXTURE(Fixture, "parse_error_messages")
 {
-    CHECK_EQ(getParseError(R"(
-            local a: (number, number) -> (string
-        )"),
-        "Expected ')' (to close '(' at line 2), got <eof>");
+    matchParseError(
+        R"(
+        local a: (number, number) -> (string
+    )",
+        "Expected ')' (to close '(' at line 2), got <eof>"
+    );
 
-    CHECK_EQ(getParseError(R"(
-            local a: (number, number) -> (
-                string
-        )"),
-        "Expected ')' (to close '(' at line 2), got <eof>");
+    matchParseError(
+        R"(
+        local a: (number, number) -> (
+            string
+    )",
+        "Expected ')' (to close '(' at line 2), got <eof>"
+    );
 
-    CHECK_EQ(getParseError(R"(
-            local a: (number, number)
-        )"),
-        "Expected '->' when parsing function type, got <eof>");
+    matchParseError(
+        R"(
+        local a: (number, number)
+    )",
+        "Expected '->' when parsing function type, got <eof>"
+    );
 
-    CHECK_EQ(getParseError(R"(
-            local a: (number, number
-        )"),
-        "Expected ')' (to close '(' at line 2), got <eof>");
+    matchParseError(
+        R"(
+        local a: (number, number
+    )",
+        "Expected ')' (to close '(' at line 2), got <eof>"
+    );
 
-    CHECK_EQ(getParseError(R"(
-            local a: {foo: string,
-        )"),
-        "Expected identifier when parsing table field, got <eof>");
+    matchParseError(
+        R"(
+        local a: {foo: string,
+    )",
+        "Expected identifier when parsing table field, got <eof>"
+    );
 
-    CHECK_EQ(getParseError(R"(
-            local a: {foo: string
-        )"),
-        "Expected '}' (to close '{' at line 2), got <eof>");
+    matchParseError(
+        R"(
+        local a: {foo: string
+    )",
+        "Expected '}' (to close '{' at line 2), got <eof>"
+    );
 
-    CHECK_EQ(getParseError(R"(
-            local a: { [string]: number, [number]: string }
-        )"),
-        "Cannot have more than one table indexer");
+    matchParseError(
+        R"(
+        local a: { [string]: number, [number]: string }
+    )",
+        "Cannot have more than one table indexer"
+    );
 
-    CHECK_EQ(getParseError(R"(
-            type T = <a>foo
-        )"),
-        "Expected '(' when parsing function parameters, got 'foo'");
+    matchParseError(
+        R"(
+        type T = <a>foo
+    )",
+        "Expected '(' when parsing function parameters, got 'foo'"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "mixed_intersection_and_union_not_allowed")
@@ -531,10 +538,10 @@ TEST_CASE_FIXTURE(Fixture, "cannot_write_multiple_values_in_type_groups")
 
 TEST_CASE_FIXTURE(Fixture, "type_alias_error_messages")
 {
-    CHECK_EQ(getParseError("type 5 = number"), "Expected identifier when parsing type name, got '5'");
-    CHECK_EQ(getParseError("type A"), "Expected '=' when parsing type alias, got <eof>");
-    CHECK_EQ(getParseError("type A<"), "Expected identifier, got <eof>");
-    CHECK_EQ(getParseError("type A<B"), "Expected '>' (to close '<' at column 7), got <eof>");
+    matchParseError("type 5 = number", "Expected identifier when parsing type name, got '5'");
+    matchParseError("type A", "Expected '=' when parsing type alias, got <eof>");
+    matchParseError("type A<", "Expected identifier, got <eof>");
+    matchParseError("type A<B", "Expected '>' (to close '<' at column 7), got <eof>");
 }
 
 TEST_CASE_FIXTURE(Fixture, "type_assertion_expression")
@@ -638,10 +645,12 @@ TEST_CASE_FIXTURE(Fixture, "vertical_space")
 
 TEST_CASE_FIXTURE(Fixture, "parse_error_type_name")
 {
-    CHECK_EQ(getParseError(R"(
-            local a: Foo.=
-        )"),
-        "Expected identifier when parsing field name, got '='");
+    matchParseError(
+        R"(
+        local a: Foo.=
+    )",
+        "Expected identifier when parsing field name, got '='"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_numbers_decimal")
@@ -687,26 +696,28 @@ TEST_CASE_FIXTURE(Fixture, "parse_numbers_binary")
 
 TEST_CASE_FIXTURE(Fixture, "parse_numbers_error")
 {
-    CHECK_EQ(getParseError("return 0b123"), "Malformed number");
-    CHECK_EQ(getParseError("return 123x"), "Malformed number");
-    CHECK_EQ(getParseError("return 0xg"), "Malformed number");
-    CHECK_EQ(getParseError("return 0x0x123"), "Malformed number");
-    CHECK_EQ(getParseError("return 0xffffffffffffffffffffllllllg"), "Malformed number");
-    CHECK_EQ(getParseError("return 0x0xffffffffffffffffffffffffffff"), "Malformed number");
+    matchParseError("return 0b123", "Malformed number");
+    matchParseError("return 123x", "Malformed number");
+    matchParseError("return 0xg", "Malformed number");
+    matchParseError("return 0x0x123", "Malformed number");
+    matchParseError("return 0xffffffffffffffffffffllllllg", "Malformed number");
+    matchParseError("return 0x0xffffffffffffffffffffffffffff", "Malformed number");
 }
 
 TEST_CASE_FIXTURE(Fixture, "break_return_not_last_error")
 {
-    CHECK_EQ(getParseError("return 0 print(5)"), "Expected <eof>, got 'print'");
-    CHECK_EQ(getParseError("while true do break print(5) end"), "Expected 'end' (to close 'do' at column 12), got 'print'");
+    matchParseError("return 0 print(5)", "Expected <eof>, got 'print'");
+    matchParseError("while true do break print(5) end", "Expected 'end' (to close 'do' at column 12), got 'print'");
 }
 
 TEST_CASE_FIXTURE(Fixture, "error_on_unicode")
 {
-    CHECK_EQ(getParseError(R"(
+    matchParseError(
+        R"(
             local ☃ = 10
-        )"),
-        "Expected identifier when parsing variable name, got Unicode character U+2603");
+        )",
+        "Expected identifier when parsing variable name, got Unicode character U+2603"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "allow_unicode_in_string")
@@ -717,18 +728,20 @@ TEST_CASE_FIXTURE(Fixture, "allow_unicode_in_string")
 
 TEST_CASE_FIXTURE(Fixture, "error_on_confusable")
 {
-    CHECK_EQ(getParseError(R"(
-            local pi = 3․13
-        )"),
-        "Expected identifier when parsing expression, got Unicode character U+2024 (did you mean '.'?)");
+    matchParseError(
+        R"(
+        local pi = 3․13
+    )",
+        "Expected identifier when parsing expression, got Unicode character U+2024 (did you mean '.'?)"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "error_on_non_utf8_sequence")
 {
     const char* expected = "Expected identifier when parsing expression, got invalid UTF-8 sequence";
 
-    CHECK_EQ(getParseError("local pi = \xFF!"), expected);
-    CHECK_EQ(getParseError("local pi = \xE2!"), expected);
+    matchParseError("local pi = \xFF!", expected);
+    matchParseError("local pi = \xE2!", expected);
 }
 
 TEST_CASE_FIXTURE(Fixture, "lex_broken_unicode")
@@ -796,7 +809,7 @@ TEST_CASE_FIXTURE(Fixture, "parse_continue")
 
 TEST_CASE_FIXTURE(Fixture, "continue_not_last_error")
 {
-    CHECK_EQ(getParseError("while true do continue print(5) end"), "Expected 'end' (to close 'do' at column 12), got 'print'");
+    matchParseError("while true do continue print(5) end", "Expected 'end' (to close 'do' at column 12), got 'print'");
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_export_type")
@@ -839,7 +852,7 @@ TEST_CASE_FIXTURE(Fixture, "export_is_an_identifier_only_when_followed_by_type")
 
 TEST_CASE_FIXTURE(Fixture, "incomplete_statement_error")
 {
-    CHECK_EQ(getParseError("fiddlesticks"), "Incomplete statement: expected assignment or a function call");
+    matchParseError("fiddlesticks", "Incomplete statement: expected assignment or a function call");
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_compound_assignment")
@@ -931,7 +944,8 @@ TEST_CASE_FIXTURE(Fixture, "parse_interpolated_string_double_brace_mid")
 
 TEST_CASE_FIXTURE(Fixture, "parse_interpolated_string_without_end_brace")
 {
-    auto columnOfEndBraceError = [this](const char* code) {
+    auto columnOfEndBraceError = [this](const char* code)
+    {
         try
         {
             parse(code);
@@ -1108,8 +1122,9 @@ end
     }
     catch (const ParseErrors& e)
     {
-        CHECK_EQ("Expected 'end' (to close 'function' at line 2), got <eof>; did you forget to close 'else' at line 8?",
-            e.getErrors().front().getMessage());
+        CHECK_EQ(
+            "Expected 'end' (to close 'function' at line 2), got <eof>; did you forget to close 'else' at line 8?", e.getErrors().front().getMessage()
+        );
     }
 }
 
@@ -1137,8 +1152,9 @@ end
     }
     catch (const ParseErrors& e)
     {
-        CHECK_EQ("Expected 'end' (to close 'function' at line 2), got <eof>; did you forget to close 'else' at line 3?",
-            e.getErrors().front().getMessage());
+        CHECK_EQ(
+            "Expected 'end' (to close 'function' at line 2), got <eof>; did you forget to close 'else' at line 3?", e.getErrors().front().getMessage()
+        );
     }
 }
 
@@ -1158,16 +1174,16 @@ until false
     }
     catch (const ParseErrors& e)
     {
-        CHECK_EQ("Expected 'until' (to close 'repeat' at line 2), got <eof>; did you forget to close 'repeat' at line 4?",
-            e.getErrors().front().getMessage());
+        CHECK_EQ(
+            "Expected 'until' (to close 'repeat' at line 2), got <eof>; did you forget to close 'repeat' at line 4?",
+            e.getErrors().front().getMessage()
+        );
     }
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_nesting_based_end_detection_local_function")
 {
-    ScopedFastFlag sff[] = {
-        {FFlag::DebugLuauDeferredConstraintResolution, false},
-    };
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
 
     try
     {
@@ -1194,16 +1210,15 @@ end
     }
     catch (const ParseErrors& e)
     {
-        CHECK_EQ("Expected 'end' (to close 'function' at line 2), got <eof>; did you forget to close 'else' at line 8?",
-            e.getErrors().front().getMessage());
+        CHECK_EQ(
+            "Expected 'end' (to close 'function' at line 2), got <eof>; did you forget to close 'else' at line 8?", e.getErrors().front().getMessage()
+        );
     }
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_nesting_based_end_detection_failsafe_earlier")
 {
-    ScopedFastFlag sff[] = {
-        {FFlag::DebugLuauDeferredConstraintResolution, false},
-    };
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
 
     try
     {
@@ -1263,8 +1278,9 @@ end
     }
     catch (const ParseErrors& e)
     {
-        CHECK_EQ("Expected 'end' (to close 'function' at line 2), got <eof>; did you forget to close 'else' at line 8?",
-            e.getErrors().front().getMessage());
+        CHECK_EQ(
+            "Expected 'end' (to close 'function' at line 2), got <eof>; did you forget to close 'else' at line 8?", e.getErrors().front().getMessage()
+        );
     }
 }
 
@@ -1283,7 +1299,8 @@ end
     catch (const ParseErrors& e)
     {
         CHECK_EQ(
-            "Expected ')' (to close '(' at column 17), got '='; did you mean to use '{' when defining a table?", e.getErrors().front().getMessage());
+            "Expected ')' (to close '(' at column 17), got '='; did you mean to use '{' when defining a table?", e.getErrors().front().getMessage()
+        );
     }
 }
 
@@ -1330,18 +1347,25 @@ TEST_CASE_FIXTURE(Fixture, "parse_error_with_too_many_nested_type_group")
     ScopedFastInt sfis{FInt::LuauRecursionLimit, 10};
 
     matchParseError(
-        "function f(): ((((((((((Fail)))))))))) end", "Exceeded allowed recursion depth; simplify your type annotation to make the code compile");
+        "function f(): ((((((((((Fail)))))))))) end", "Exceeded allowed recursion depth; simplify your type annotation to make the code compile"
+    );
 
-    matchParseError("function f(): () -> () -> () -> () -> () -> () -> () -> () -> () -> () -> () end",
-        "Exceeded allowed recursion depth; simplify your type annotation to make the code compile");
+    matchParseError(
+        "function f(): () -> () -> () -> () -> () -> () -> () -> () -> () -> () -> () end",
+        "Exceeded allowed recursion depth; simplify your type annotation to make the code compile"
+    );
 
-    matchParseError("local t: {a: {b: {c: {d: {e: {f: {g: {h: {i: {j: {}}}}}}}}}}}",
-        "Exceeded allowed recursion depth; simplify your type annotation to make the code compile");
+    matchParseError(
+        "local t: {a: {b: {c: {d: {e: {f: {g: {h: {i: {j: {}}}}}}}}}}}",
+        "Exceeded allowed recursion depth; simplify your type annotation to make the code compile"
+    );
 
     matchParseError("local f: ((((((((((Fail))))))))))", "Exceeded allowed recursion depth; simplify your type annotation to make the code compile");
 
-    matchParseError("local t: a & (b & (c & (d & (e & (f & (g & (h & (i & (j & nil)))))))))",
-        "Exceeded allowed recursion depth; simplify your type annotation to make the code compile");
+    matchParseError(
+        "local t: a & (b & (c & (d & (e & (f & (g & (h & (i & (j & nil)))))))))",
+        "Exceeded allowed recursion depth; simplify your type annotation to make the code compile"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "can_parse_complex_unions_successfully")
@@ -1371,8 +1395,9 @@ local f:
 local f: a? | b? | c? | d? | e? | f? | g? | h?
 )");
 
-    matchParseError("local t: a & b & c & d & e & f & g & h & i & j & nil",
-        "Exceeded allowed type length; simplify your type annotation to make the code compile");
+    matchParseError(
+        "local t: a & b & c & d & e & f & g & h & i & j & nil", "Exceeded allowed type length; simplify your type annotation to make the code compile"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_error_with_too_many_nested_if_statements")
@@ -1382,7 +1407,8 @@ TEST_CASE_FIXTURE(Fixture, "parse_error_with_too_many_nested_if_statements")
     matchParseErrorPrefix(
         "function f() if true then if true then if true then if true then if true then if true then if true then if true then if true "
         "then if true then if true then end end end end end end end end end end end end",
-        "Exceeded allowed recursion depth;");
+        "Exceeded allowed recursion depth;"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_error_with_too_many_changed_elseif_statements")
@@ -1392,16 +1418,19 @@ TEST_CASE_FIXTURE(Fixture, "parse_error_with_too_many_changed_elseif_statements"
     matchParseErrorPrefix(
         "function f() if false then elseif false then elseif false then elseif false then elseif false then elseif false then elseif "
         "false then elseif false then elseif false then elseif false then elseif false then end end",
-        "Exceeded allowed recursion depth;");
+        "Exceeded allowed recursion depth;"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_error_with_too_many_nested_ifelse_expressions1")
 {
     ScopedFastInt sfis{FInt::LuauRecursionLimit, 10};
 
-    matchParseError("function f() return if true then 1 elseif true then 2 elseif true then 3 elseif true then 4 elseif true then 5 elseif true then "
-                    "6 elseif true then 7 elseif true then 8 elseif true then 9 elseif true then 10 else 11 end",
-        "Exceeded allowed recursion depth; simplify your expression to make the code compile");
+    matchParseError(
+        "function f() return if true then 1 elseif true then 2 elseif true then 3 elseif true then 4 elseif true then 5 elseif true then "
+        "6 elseif true then 7 elseif true then 8 elseif true then 9 elseif true then 10 else 11 end",
+        "Exceeded allowed recursion depth; simplify your expression to make the code compile"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_error_with_too_many_nested_ifelse_expressions2")
@@ -1411,16 +1440,19 @@ TEST_CASE_FIXTURE(Fixture, "parse_error_with_too_many_nested_ifelse_expressions2
     matchParseError(
         "function f() return if if if if if if if if if if true then false else true then false else true then false else true then false else true "
         "then false else true then false else true then false else true then false else true then false else true then 1 else 2 end",
-        "Exceeded allowed recursion depth; simplify your expression to make the code compile");
+        "Exceeded allowed recursion depth; simplify your expression to make the code compile"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "unparenthesized_function_return_type_list")
 {
     matchParseError(
-        "function foo(): string, number end", "Expected a statement, got ','; did you forget to wrap the list of return types in parentheses?");
+        "function foo(): string, number end", "Expected a statement, got ','; did you forget to wrap the list of return types in parentheses?"
+    );
 
-    matchParseError("function foo(): (number) -> string, string",
-        "Expected a statement, got ','; did you forget to wrap the list of return types in parentheses?");
+    matchParseError(
+        "function foo(): (number) -> string, string", "Expected a statement, got ','; did you forget to wrap the list of return types in parentheses?"
+    );
 
     // Will throw if the parse fails
     parse(R"(
@@ -1728,12 +1760,14 @@ TEST_CASE_FIXTURE(Fixture, "end_extent_doesnt_consume_comments_even_with_capture
     ParseOptions opts;
     opts.captureComments = true;
 
-    AstStatBlock* block = parse(R"(
+    AstStatBlock* block = parse(
+        R"(
         type F = number
         --comment
         print('hello')
     )",
-        opts);
+        opts
+    );
 
     REQUIRE_EQ(2, block->body.size);
     CHECK_EQ((Position{1, 23}), block->body.data[0]->location.end);
@@ -1749,45 +1783,53 @@ TEST_CASE_FIXTURE(Fixture, "parse_error_loop_control")
 
 TEST_CASE_FIXTURE(Fixture, "parse_error_confusing_function_call")
 {
-    auto result1 = matchParseError(R"(
+    auto result1 = matchParseError(
+        R"(
         function add(x, y) return x + y end
         add
         (4, 7)
     )",
         "Ambiguous syntax: this looks like an argument list for a function call, but could also be a start of new statement; use ';' to separate "
-        "statements");
+        "statements"
+    );
 
     CHECK(result1.errors.size() == 1);
 
-    auto result2 = matchParseError(R"(
+    auto result2 = matchParseError(
+        R"(
         function add(x, y) return x + y end
         local f = add
         (f :: any)['x'] = 2
     )",
         "Ambiguous syntax: this looks like an argument list for a function call, but could also be a start of new statement; use ';' to separate "
-        "statements");
+        "statements"
+    );
 
     CHECK(result2.errors.size() == 1);
 
-    auto result3 = matchParseError(R"(
+    auto result3 = matchParseError(
+        R"(
         local x = {}
         function x:add(a, b) return a + b end
         x:add
         (1, 2)
     )",
         "Ambiguous syntax: this looks like an argument list for a function call, but could also be a start of new statement; use ';' to separate "
-        "statements");
+        "statements"
+    );
 
     CHECK(result3.errors.size() == 1);
 
-    auto result4 = matchParseError(R"(
+    auto result4 = matchParseError(
+        R"(
         local t = {}
         function f() return t end
         t.x, (f)
         ().y = 5, 6
     )",
         "Ambiguous syntax: this looks like an argument list for a function call, but could also be a start of new statement; use ';' to separate "
-        "statements");
+        "statements"
+    );
 
     CHECK(result4.errors.size() == 1);
 }
@@ -1799,17 +1841,21 @@ TEST_CASE_FIXTURE(Fixture, "parse_error_varargs")
 
 TEST_CASE_FIXTURE(Fixture, "parse_error_assignment_lvalue")
 {
-    matchParseError(R"(
+    matchParseError(
+        R"(
         local a, b
         (2), b = b, a
     )",
-        "Assigned expression must be a variable or a field");
+        "Assigned expression must be a variable or a field"
+    );
 
-    matchParseError(R"(
+    matchParseError(
+        R"(
         local a, b
         a, (3) = b, a
     )",
-        "Assigned expression must be a variable or a field");
+        "Assigned expression must be a variable or a field"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_error_type_annotation")
@@ -1859,8 +1905,6 @@ function func():end
 
 TEST_CASE_FIXTURE(Fixture, "parse_declarations")
 {
-    ScopedFastFlag luauDeclarationExtraPropData{FFlag::LuauDeclarationExtraPropData, true};
-
     AstStatBlock* stat = parseEx(R"(
         declare foo: number
         declare function bar(x: number): string
@@ -1898,8 +1942,6 @@ TEST_CASE_FIXTURE(Fixture, "parse_declarations")
 
 TEST_CASE_FIXTURE(Fixture, "parse_class_declarations")
 {
-    ScopedFastFlag luauDeclarationExtraPropData{FFlag::LuauDeclarationExtraPropData, true};
-
     AstStatBlock* stat = parseEx(R"(
         declare class Foo
             prop: number
@@ -1950,14 +1992,16 @@ TEST_CASE_FIXTURE(Fixture, "parse_class_declarations")
 
 TEST_CASE_FIXTURE(Fixture, "class_method_properties")
 {
-    const ParseResult p1 = matchParseError(R"(
+    const ParseResult p1 = matchParseError(
+        R"(
         declare class Foo
             -- method's first parameter must be 'self'
             function method(foo: number)
             function method2(self)
         end
         )",
-        "'self' must be present as the unannotated first parameter");
+        "'self' must be present as the unannotated first parameter"
+    );
 
     REQUIRE_EQ(1, p1.root->body.size);
 
@@ -1966,13 +2010,15 @@ TEST_CASE_FIXTURE(Fixture, "class_method_properties")
 
     CHECK_EQ(2, klass->props.size);
 
-    const ParseResult p2 = matchParseError(R"(
+    const ParseResult p2 = matchParseError(
+        R"(
         declare class Foo
             function method(self, foo)
             function method2()
         end
         )",
-        "All declaration parameters aside from 'self' must be annotated");
+        "All declaration parameters aside from 'self' must be annotated"
+    );
 
     REQUIRE_EQ(1, p2.root->body.size);
 
@@ -2002,14 +2048,16 @@ TEST_CASE_FIXTURE(Fixture, "class_indexer")
     REQUIRE(declaredClass->indexer->resultType->is<AstTypeReference>());
     CHECK(declaredClass->indexer->resultType->as<AstTypeReference>()->name == "number");
 
-    const ParseResult p1 = matchParseError(R"(
+    const ParseResult p1 = matchParseError(
+        R"(
         declare class Foo
             [string]: number
             -- can only have one indexer
             [number]: number
         end
         )",
-        "Cannot have more than one class indexer");
+        "Cannot have more than one class indexer"
+    );
 
     REQUIRE_EQ(1, p1.root->body.size);
 
@@ -2020,7 +2068,6 @@ TEST_CASE_FIXTURE(Fixture, "class_indexer")
 
 TEST_CASE_FIXTURE(Fixture, "parse_variadics")
 {
-    //clang-format off
     AstStatBlock* stat = parseEx(R"(
         function foo(bar, ...: number): ...string
         end
@@ -2029,7 +2076,6 @@ TEST_CASE_FIXTURE(Fixture, "parse_variadics")
         type Bar = () -> (number, ...boolean)
     )")
                              .root;
-    //clang-format on
 
     REQUIRE(stat);
     REQUIRE_EQ(stat->body.size, 3);
@@ -2078,6 +2124,18 @@ TEST_CASE_FIXTURE(Fixture, "variadic_definition_parsing")
 
     matchParseError("declare function foo(...)", "All declaration parameters must be annotated");
     matchParseError("declare class Foo function a(self, ...) end", "All declaration parameters aside from 'self' must be annotated");
+}
+
+TEST_CASE_FIXTURE(Fixture, "missing_declaration_prop")
+{
+    matchParseError(
+        R"(
+        declare class Foo
+            a: number,
+        end
+    )",
+        "Expected identifier when parsing property name, got ','"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "generic_pack_parsing")
@@ -2202,8 +2260,9 @@ TEST_CASE_FIXTURE(Fixture, "function_type_named_arguments")
         CHECK_EQ(funcRet->argNames.data[2]->first, "f");
     }
 
-    matchParseError("type MyFunc = (a: number, b: string, c: number) -> (d: number, e: string, f: number)",
-        "Expected '->' when parsing function type, got <eof>");
+    matchParseError(
+        "type MyFunc = (a: number, b: string, c: number) -> (d: number, e: string, f: number)", "Expected '->' when parsing function type, got <eof>"
+    );
 
     matchParseError("type MyFunc = (number) -> (d: number) <a, b, c> -> number", "Expected '->' when parsing function type, got '<'");
 }
@@ -2237,8 +2296,11 @@ TEST_CASE_FIXTURE(Fixture, "parse_type_alias_default_type_errors")
 
 TEST_CASE_FIXTURE(Fixture, "parse_type_pack_errors")
 {
-    matchParseError("type Y<T...> = {a: T..., b: number}", "Unexpected '...' after type name; type pack is not allowed in this context",
-        Location{{0, 20}, {0, 23}});
+    matchParseError(
+        "type Y<T...> = {a: T..., b: number}",
+        "Unexpected '...' after type name; type pack is not allowed in this context",
+        Location{{0, 20}, {0, 23}}
+    );
     matchParseError("type Y<T...> = {a: (number | string)...", "Unexpected '...' after type annotation", Location{{0, 36}, {0, 39}});
 }
 
@@ -2314,6 +2376,170 @@ TEST_CASE_FIXTURE(Fixture, "invalid_type_forms")
     matchParseError("type A = (b: number)", "Expected '->' when parsing function type, got <eof>");
     matchParseError("type P<T...> = () -> T... type B = P<(x: number, y: string)>", "Expected '->' when parsing function type, got '>'");
     matchParseError("type F<T... = (a: string)> = (T...) -> ()", "Expected '->' when parsing function type, got '>'");
+}
+
+TEST_CASE_FIXTURE(Fixture, "parse_user_defined_type_functions")
+{
+    AstStat* stat = parse(R"(
+        type function foo()
+            return types.number
+        end
+
+        export type function bar()
+            return types.string
+        end
+    )");
+
+    REQUIRE(stat != nullptr);
+    AstStatTypeFunction* f = stat->as<AstStatBlock>()->body.data[0]->as<AstStatTypeFunction>();
+    REQUIRE(f != nullptr);
+    REQUIRE(f->name == "foo");
+}
+
+TEST_CASE_FIXTURE(Fixture, "parse_nested_type_function")
+{
+    AstStat* stat = parse(R"(
+        local v1 = 1
+        type function foo()
+            local v2 = 2
+            local function bar()
+                v2 += 1
+                type function inner() end
+                v2 += 2
+            end
+            local function bar2()
+                v2 += 3
+            end
+        end
+        local function bar() v1 += 1 end
+    )");
+
+    REQUIRE(stat != nullptr);
+}
+
+TEST_CASE_FIXTURE(Fixture, "invalid_user_defined_type_functions")
+{
+    matchParseError("local foo = 1; type function bar() print(foo) end", "Type function cannot reference outer local 'foo'");
+    matchParseError("type function foo() local v1 = 1; type function bar() print(v1) end end", "Type function cannot reference outer local 'v1'");
+}
+
+TEST_CASE_FIXTURE(Fixture, "leading_union_intersection_with_single_type_preserves_the_union_intersection_ast_node")
+{
+    ScopedFastFlag _{FFlag::LuauPreserveUnionIntersectionNodeForLeadingTokenSingleType, true};
+    AstStatBlock* block = parse(R"(
+        type Foo = | string
+        type Bar = & number
+    )");
+
+    REQUIRE_EQ(2, block->body.size);
+
+    const auto alias1 = block->body.data[0]->as<AstStatTypeAlias>();
+    REQUIRE(alias1);
+
+    const auto unionType = alias1->type->as<AstTypeUnion>();
+    REQUIRE(unionType);
+    CHECK_EQ(1, unionType->types.size);
+
+    const auto alias2 = block->body.data[1]->as<AstStatTypeAlias>();
+    REQUIRE(alias2);
+
+    const auto intersectionType = alias2->type->as<AstTypeIntersection>();
+    REQUIRE(intersectionType);
+    CHECK_EQ(1, intersectionType->types.size);
+}
+
+TEST_CASE_FIXTURE(Fixture, "parse_simple_ast_type_group")
+{
+    ScopedFastFlag _{FFlag::LuauAstTypeGroup3, true};
+
+    AstStatBlock* stat = parse(R"(
+        type Foo = (string)
+    )");
+    REQUIRE(stat);
+    REQUIRE_EQ(1, stat->body.size);
+
+    auto alias1 = stat->body.data[0]->as<AstStatTypeAlias>();
+    REQUIRE(alias1);
+
+    auto group1 = alias1->type->as<AstTypeGroup>();
+    REQUIRE(group1);
+    CHECK(group1->type->is<AstTypeReference>());
+}
+
+TEST_CASE_FIXTURE(Fixture, "parse_nested_ast_type_group")
+{
+    ScopedFastFlag _{FFlag::LuauAstTypeGroup3, true};
+
+    AstStatBlock* stat = parse(R"(
+        type Foo = ((string))
+    )");
+    REQUIRE(stat);
+    REQUIRE_EQ(1, stat->body.size);
+
+    auto alias1 = stat->body.data[0]->as<AstStatTypeAlias>();
+    REQUIRE(alias1);
+
+    auto group1 = alias1->type->as<AstTypeGroup>();
+    REQUIRE(group1);
+
+    auto group2 = group1->type->as<AstTypeGroup>();
+    REQUIRE(group2);
+    CHECK(group2->type->is<AstTypeReference>());
+}
+
+TEST_CASE_FIXTURE(Fixture, "parse_return_type_ast_type_group")
+{
+    ScopedFastFlag _{FFlag::LuauAstTypeGroup3, true};
+
+    AstStatBlock* stat = parse(R"(
+        type Foo = () -> (string)
+    )");
+    REQUIRE(stat);
+    REQUIRE_EQ(1, stat->body.size);
+
+    auto alias1 = stat->body.data[0]->as<AstStatTypeAlias>();
+    REQUIRE(alias1);
+
+    auto funcType = alias1->type->as<AstTypeFunction>();
+    REQUIRE(funcType);
+
+    REQUIRE_EQ(1, funcType->returnTypes.types.size);
+    REQUIRE(!funcType->returnTypes.tailType);
+    CHECK(funcType->returnTypes.types.data[0]->is<AstTypeGroup>());
+}
+
+TEST_CASE_FIXTURE(Fixture, "inner_and_outer_scope_of_functions_have_correct_end_position")
+{
+
+    AstStatBlock* stat = parse(R"(
+        local function foo()
+            local x = 1
+        end
+    )");
+    REQUIRE(stat);
+    REQUIRE_EQ(1, stat->body.size);
+
+    auto func = stat->body.data[0]->as<AstStatLocalFunction>();
+    REQUIRE(func);
+    CHECK_EQ(func->func->body->location, Location{{1, 28}, {3, 8}});
+    CHECK_EQ(func->location, Location{{1, 8}, {3, 11}});
+}
+
+TEST_CASE_FIXTURE(Fixture, "do_block_end_location_is_after_end_token")
+{
+    ScopedFastFlag _{FFlag::LuauFixDoBlockEndLocation, true};
+
+    AstStatBlock* stat = parse(R"(
+        do
+            local x = 1
+        end
+    )");
+    REQUIRE(stat);
+    REQUIRE_EQ(1, stat->body.size);
+
+    auto block = stat->body.data[0]->as<AstStatBlock>();
+    REQUIRE(block);
+    CHECK_EQ(block->location, Location{{1, 8}, {3, 11}});
 }
 
 TEST_SUITE_END();
@@ -2483,7 +2709,8 @@ public:
 
 TEST_CASE_FIXTURE(Fixture, "recovery_of_parenthesized_expressions")
 {
-    auto checkAstEquivalence = [this](const char* codeWithErrors, const char* code) {
+    auto checkAstEquivalence = [this](const char* codeWithErrors, const char* code)
+    {
         try
         {
             parse(codeWithErrors);
@@ -2503,7 +2730,8 @@ TEST_CASE_FIXTURE(Fixture, "recovery_of_parenthesized_expressions")
         CHECK_EQ(counterWithErrors.count, counter.count);
     };
 
-    auto checkRecovery = [this, checkAstEquivalence](const char* codeWithErrors, const char* code, unsigned expectedErrorCount) {
+    auto checkRecovery = [this, checkAstEquivalence](const char* codeWithErrors, const char* code, unsigned expectedErrorCount)
+    {
         try
         {
             parse(codeWithErrors);
@@ -2516,13 +2744,12 @@ TEST_CASE_FIXTURE(Fixture, "recovery_of_parenthesized_expressions")
         }
     };
 
-    ScopedFastFlag sff[] = {
-        {FFlag::DebugLuauDeferredConstraintResolution, false},
-    };
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
 
     checkRecovery("function foo(a, b. c) return a + b end", "function foo(a, b) return a + b end", 1);
-    checkRecovery("function foo(a, b: { a: number, b: number. c:number }) return a + b end",
-        "function foo(a, b: { a: number, b: number }) return a + b end", 1);
+    checkRecovery(
+        "function foo(a, b: { a: number, b: number. c:number }) return a + b end", "function foo(a, b: { a: number, b: number }) return a + b end", 1
+    );
 
     checkRecovery("function foo(a, b): (number -> number return a + b end", "function foo(a, b): (number) -> number return a + b end", 1);
     checkRecovery("function foo(a, b): (number, number -> number return a + b end", "function foo(a, b): (number) -> number return a + b end", 1);
@@ -2539,12 +2766,15 @@ TEST_CASE_FIXTURE(Fixture, "recovery_of_parenthesized_expressions")
     checkRecovery("local n: (string | number = 2", "local n: (string | number) = 2", 1);
 
     // Check that we correctly stop at the end of a line
-    checkRecovery(R"(
+    checkRecovery(
+        R"(
 function foo(a, b
     return a + b
 end
 )",
-        "function foo(a, b) return a + b end", 1);
+        "function foo(a, b) return a + b end",
+        1
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "incomplete_method_call")
@@ -2638,7 +2868,8 @@ TEST_CASE_FIXTURE(Fixture, "capture_comments")
     ParseOptions options;
     options.captureComments = true;
 
-    ParseResult result = parseEx(R"(
+    ParseResult result = parseEx(
+        R"(
         --!strict
 
         local a = 5 -- comment one
@@ -2648,7 +2879,8 @@ TEST_CASE_FIXTURE(Fixture, "capture_comments")
         ]]
         local c = 'see'
     )",
-        options);
+        options
+    );
 
     CHECK(result.errors.empty());
 
@@ -2664,10 +2896,12 @@ TEST_CASE_FIXTURE(Fixture, "capture_broken_comment_at_the_start_of_the_file")
     ParseOptions options;
     options.captureComments = true;
 
-    ParseResult result = tryParse(R"(
+    ParseResult result = tryParse(
+        R"(
         --[[
     )",
-        options);
+        options
+    );
 
     CHECK_EQ(1, result.commentLocations.size());
     CHECK_EQ((Location{{1, 8}, {2, 4}}), result.commentLocations[0].location);
@@ -2678,12 +2912,14 @@ TEST_CASE_FIXTURE(Fixture, "capture_broken_comment")
     ParseOptions options;
     options.captureComments = true;
 
-    ParseResult result = tryParse(R"(
+    ParseResult result = tryParse(
+        R"(
         local a = "test"
 
         --[[broken!
     )",
-        options);
+        options
+    );
 
     CHECK_EQ(1, result.commentLocations.size());
     CHECK_EQ((Location{{3, 8}, {4, 4}}), result.commentLocations[0].location);
@@ -2750,9 +2986,7 @@ TEST_CASE_FIXTURE(Fixture, "AstName_comparison")
 
 TEST_CASE_FIXTURE(Fixture, "generic_type_list_recovery")
 {
-    ScopedFastFlag sff[] = {
-        {FFlag::DebugLuauDeferredConstraintResolution, false},
-    };
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
 
     try
     {
@@ -2857,8 +3091,10 @@ TEST_CASE_FIXTURE(Fixture, "error_message_for_using_function_as_type_annotation"
         type Foo = function
     )");
     REQUIRE_EQ(1, result.errors.size());
-    CHECK_EQ("Using 'function' as a type annotation is not supported, consider replacing with a function type annotation e.g. '(...any) -> ...any'",
-        result.errors[0].getMessage());
+    CHECK_EQ(
+        "Using 'function' as a type annotation is not supported, consider replacing with a function type annotation e.g. '(...any) -> ...any'",
+        result.errors[0].getMessage()
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "get_a_nice_error_when_there_is_an_extra_comma_at_the_end_of_a_function_argument_list")
@@ -3046,8 +3282,6 @@ TEST_CASE_FIXTURE(Fixture, "do_block_with_no_end")
 
 TEST_CASE_FIXTURE(Fixture, "parse_interpolated_string_with_lookahead_involved")
 {
-    ScopedFastFlag sff{FFlag::LuauLexerLookaheadRemembersBraceType, true};
-
     ParseResult result = tryParse(R"(
         local x = `{ {y} }`
     )");
@@ -3057,8 +3291,6 @@ TEST_CASE_FIXTURE(Fixture, "parse_interpolated_string_with_lookahead_involved")
 
 TEST_CASE_FIXTURE(Fixture, "parse_interpolated_string_with_lookahead_involved2")
 {
-    ScopedFastFlag sff{FFlag::LuauLexerLookaheadRemembersBraceType, true};
-
     ParseResult result = tryParse(R"(
         local x = `{ { y{} } }`
     )");
@@ -3070,7 +3302,6 @@ TEST_CASE_FIXTURE(Fixture, "parse_top_level_checked_fn")
 {
     ParseOptions opts;
     opts.allowDeclarationSyntax = true;
-    ScopedFastFlag luauAttributeSyntax{FFlag::LuauAttributeSyntax, true};
 
     std::string src = R"BUILTIN_SRC(
 @checked declare function abs(n: number): number
@@ -3090,7 +3321,6 @@ TEST_CASE_FIXTURE(Fixture, "parse_declared_table_checked_member")
 {
     ParseOptions opts;
     opts.allowDeclarationSyntax = true;
-    ScopedFastFlag luauAttributeSyntax{FFlag::LuauAttributeSyntax, true};
 
     const std::string src = R"BUILTIN_SRC(
     declare math : {
@@ -3118,12 +3348,13 @@ TEST_CASE_FIXTURE(Fixture, "parse_checked_outside_decl_fails")
 {
     ParseOptions opts;
     opts.allowDeclarationSyntax = true;
-    ScopedFastFlag luauAttributeSyntax{FFlag::LuauAttributeSyntax, true};
 
-    ParseResult pr = tryParse(R"(
+    ParseResult pr = tryParse(
+        R"(
     local @checked = 3
 )",
-        opts);
+        opts
+    );
     LUAU_ASSERT(pr.errors.size() > 0);
     auto ts = pr.errors[1].getMessage();
 }
@@ -3132,13 +3363,14 @@ TEST_CASE_FIXTURE(Fixture, "parse_checked_in_and_out_of_decl_fails")
 {
     ParseOptions opts;
     opts.allowDeclarationSyntax = true;
-    ScopedFastFlag luauAttributeSyntax{FFlag::LuauAttributeSyntax, true};
 
-    auto pr = tryParse(R"(
+    auto pr = tryParse(
+        R"(
     local @checked = 3
     @checked declare function abs(n: number): number
 )",
-        opts);
+        opts
+    );
     LUAU_ASSERT(pr.errors.size() == 2);
     LUAU_ASSERT(pr.errors[0].getLocation().begin.line == 1);
     LUAU_ASSERT(pr.errors[1].getLocation().begin.line == 1);
@@ -3148,13 +3380,14 @@ TEST_CASE_FIXTURE(Fixture, "parse_checked_as_function_name_fails")
 {
     ParseOptions opts;
     opts.allowDeclarationSyntax = true;
-    ScopedFastFlag luauAttributeSyntax{FFlag::LuauAttributeSyntax, true};
 
-    auto pr = tryParse(R"(
+    auto pr = tryParse(
+        R"(
     @checked function(x: number) : number
     end
 )",
-        opts);
+        opts
+    );
     LUAU_ASSERT(pr.errors.size() > 0);
 }
 
@@ -3162,12 +3395,13 @@ TEST_CASE_FIXTURE(Fixture, "cannot_use_@_as_variable_name")
 {
     ParseOptions opts;
     opts.allowDeclarationSyntax = true;
-    ScopedFastFlag luauAttributeSyntax{FFlag::LuauAttributeSyntax, true};
 
-    auto pr = tryParse(R"(
+    auto pr = tryParse(
+        R"(
     local @blah = 3
 )",
-        opts);
+        opts
+    );
 
     LUAU_ASSERT(pr.errors.size() > 0);
 }
@@ -3193,28 +3427,6 @@ TEST_CASE_FIXTURE(Fixture, "read_write_table_properties")
     LUAU_ASSERT(pr.errors.size() == 0);
 }
 
-TEST_CASE_FIXTURE(Fixture, "can_parse_leading_bar_unions_successfully")
-{
-    ScopedFastFlag sff{FFlag::LuauLeadingBarAndAmpersand2, true};
-
-    parse(R"(type A = | "Hello" | "World")");
-}
-
-TEST_CASE_FIXTURE(Fixture, "can_parse_leading_ampersand_intersections_successfully")
-{
-    ScopedFastFlag sff{FFlag::LuauLeadingBarAndAmpersand2, true};
-
-    parse(R"(type A = & { string } & { number })");
-}
-
-TEST_CASE_FIXTURE(Fixture, "mixed_leading_intersection_and_union_not_allowed")
-{
-    ScopedFastFlag sff{FFlag::LuauLeadingBarAndAmpersand2, true};
-
-    matchParseError("type A = & number | string | boolean", "Mixing union and intersection types is not allowed; consider wrapping in parentheses.");
-    matchParseError("type A = | number & string & boolean", "Mixing union and intersection types is not allowed; consider wrapping in parentheses.");
-}
-
 void checkAttribute(const AstAttr* attr, const AstAttr::Type type, const Location& location)
 {
     CHECK_EQ(attr->type, type);
@@ -3232,7 +3444,6 @@ void checkFirstErrorForAttributes(const std::vector<ParseError>& errors, const s
 
 TEST_CASE_FIXTURE(Fixture, "parse_attribute_on_function_stat")
 {
-    ScopedFastFlag luauAttributeSyntax{FFlag::LuauAttributeSyntax, true};
 
     AstStatBlock* stat = parse(R"(
 @checked
@@ -3254,8 +3465,6 @@ end)");
 
 TEST_CASE_FIXTURE(Fixture, "parse_attribute_for_function_expression")
 {
-    ScopedFastFlag sff[] = {{FFlag::LuauAttributeSyntax, true}, {FFlag::LuauAttributeSyntaxFunExpr, true}};
-
     AstStatBlock* stat1 = parse(R"(
 local function invoker(f)
     return f(1)
@@ -3293,8 +3502,6 @@ local f = @checked function(x) return (x + 2) end
 
 TEST_CASE_FIXTURE(Fixture, "parse_attribute_on_local_function_stat")
 {
-    ScopedFastFlag luauAttributeSyntax{FFlag::LuauAttributeSyntax, true};
-
     AstStatBlock* stat = parse(R"(
     @checked
 local function hello(x, y)
@@ -3315,8 +3522,6 @@ end)");
 
 TEST_CASE_FIXTURE(Fixture, "empty_attribute_name_is_not_allowed")
 {
-    ScopedFastFlag luauAttributeSyntax{FFlag::LuauAttributeSyntax, true};
-
     ParseResult result = tryParse(R"(
 @
 function hello(x, y)
@@ -3328,13 +3533,15 @@ end)");
 
 TEST_CASE_FIXTURE(Fixture, "dont_parse_attributes_on_non_function_stat")
 {
-    ScopedFastFlag luauAttributeSyntax{FFlag::LuauAttributeSyntax, true};
-
     ParseResult pr1 = tryParse(R"(
 @checked
 if a<0 then a = 0 end)");
-    checkFirstErrorForAttributes(pr1.errors, 1, Location(Position(2, 0), Position(2, 2)),
-        "Expected 'function', 'local function', 'declare function' or a function type declaration after attribute, but got 'if' instead");
+    checkFirstErrorForAttributes(
+        pr1.errors,
+        1,
+        Location(Position(2, 0), Position(2, 2)),
+        "Expected 'function', 'local function', 'declare function' or a function type declaration after attribute, but got 'if' instead"
+    );
 
     ParseResult pr2 = tryParse(R"(
 local i = 1
@@ -3343,8 +3550,12 @@ while a[i] do
     print(a[i])
     i = i + 1
 end)");
-    checkFirstErrorForAttributes(pr2.errors, 1, Location(Position(3, 0), Position(3, 5)),
-        "Expected 'function', 'local function', 'declare function' or a function type declaration after attribute, but got 'while' instead");
+    checkFirstErrorForAttributes(
+        pr2.errors,
+        1,
+        Location(Position(3, 0), Position(3, 5)),
+        "Expected 'function', 'local function', 'declare function' or a function type declaration after attribute, but got 'while' instead"
+    );
 
     ParseResult pr3 = tryParse(R"(
 @checked
@@ -3354,15 +3565,23 @@ do
     x1 = (-b + d)/a2
     x2 = (-b - d)/a2
 end)");
-    checkFirstErrorForAttributes(pr3.errors, 1, Location(Position(2, 0), Position(2, 2)),
-        "Expected 'function', 'local function', 'declare function' or a function type declaration after attribute, but got 'do' instead");
+    checkFirstErrorForAttributes(
+        pr3.errors,
+        1,
+        Location(Position(2, 0), Position(2, 2)),
+        "Expected 'function', 'local function', 'declare function' or a function type declaration after attribute, but got 'do' instead"
+    );
 
     ParseResult pr4 = tryParse(R"(
 @checked
 for i=1,10 do print(i) end
 )");
-    checkFirstErrorForAttributes(pr4.errors, 1, Location(Position(2, 0), Position(2, 3)),
-        "Expected 'function', 'local function', 'declare function' or a function type declaration after attribute, but got 'for' instead");
+    checkFirstErrorForAttributes(
+        pr4.errors,
+        1,
+        Location(Position(2, 0), Position(2, 3)),
+        "Expected 'function', 'local function', 'declare function' or a function type declaration after attribute, but got 'for' instead"
+    );
 
     ParseResult pr5 = tryParse(R"(
 @checked
@@ -3370,8 +3589,12 @@ repeat
     line = io.read()
 until line ~= ""
 )");
-    checkFirstErrorForAttributes(pr5.errors, 1, Location(Position(2, 0), Position(2, 6)),
-        "Expected 'function', 'local function', 'declare function' or a function type declaration after attribute, but got 'repeat' instead");
+    checkFirstErrorForAttributes(
+        pr5.errors,
+        1,
+        Location(Position(2, 0), Position(2, 6)),
+        "Expected 'function', 'local function', 'declare function' or a function type declaration after attribute, but got 'repeat' instead"
+    );
 
 
     ParseResult pr6 = tryParse(R"(
@@ -3379,7 +3602,8 @@ until line ~= ""
 local x = 10
 )");
     checkFirstErrorForAttributes(
-        pr6.errors, 1, Location(Position(2, 6), Position(2, 7)), "Expected 'function' after local declaration with attribute, but got 'x' instead");
+        pr6.errors, 1, Location(Position(2, 6), Position(2, 7)), "Expected 'function' after local declaration with attribute, but got 'x' instead"
+    );
 
     ParseResult pr7 = tryParse(R"(
 local i = 1
@@ -3388,21 +3612,27 @@ while a[i] do
     i = i + 1
 end
 )");
-    checkFirstErrorForAttributes(pr7.errors, 1, Location(Position(3, 31), Position(3, 36)),
-        "Expected 'function', 'local function', 'declare function' or a function type declaration after attribute, but got 'break' instead");
+    checkFirstErrorForAttributes(
+        pr7.errors,
+        1,
+        Location(Position(3, 31), Position(3, 36)),
+        "Expected 'function', 'local function', 'declare function' or a function type declaration after attribute, but got 'break' instead"
+    );
 
 
     ParseResult pr8 = tryParse(R"(
 function foo1 () @checked return 'a' end
 )");
-    checkFirstErrorForAttributes(pr8.errors, 1, Location(Position(1, 26), Position(1, 32)),
-        "Expected 'function', 'local function', 'declare function' or a function type declaration after attribute, but got 'return' instead");
+    checkFirstErrorForAttributes(
+        pr8.errors,
+        1,
+        Location(Position(1, 26), Position(1, 32)),
+        "Expected 'function', 'local function', 'declare function' or a function type declaration after attribute, but got 'return' instead"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "dont_parse_attribute_on_argument_non_function")
 {
-    ScopedFastFlag sff[] = {{FFlag::LuauAttributeSyntax, true}, {FFlag::LuauAttributeSyntaxFunExpr, true}};
-
     ParseResult pr = tryParse(R"(
 local function invoker(f, y)
     return f(y)
@@ -3412,13 +3642,12 @@ invoker(function(x) return (x + 2) end, @checked 1)
 )");
 
     checkFirstErrorForAttributes(
-        pr.errors, 1, Location(Position(5, 40), Position(5, 48)), "Expected 'function' declaration after attribute, but got '1' instead");
+        pr.errors, 1, Location(Position(5, 40), Position(5, 48)), "Expected 'function' declaration after attribute, but got '1' instead"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_attribute_on_function_type_declaration")
 {
-    ScopedFastFlag luauAttributeSyntax{FFlag::LuauAttributeSyntax, true};
-
     ParseOptions opts;
     opts.allowDeclarationSyntax = true;
 
@@ -3445,8 +3674,6 @@ TEST_CASE_FIXTURE(Fixture, "parse_attribute_on_function_type_declaration")
 
 TEST_CASE_FIXTURE(Fixture, "parse_attributes_on_function_type_declaration_in_table")
 {
-    ScopedFastFlag luauAttributeSyntax{FFlag::LuauAttributeSyntax, true};
-
     ParseOptions opts;
     opts.allowDeclarationSyntax = true;
 
@@ -3482,43 +3709,48 @@ declare bit32: {
 
 TEST_CASE_FIXTURE(Fixture, "dont_parse_attributes_on_non_function_type_declarations")
 {
-    ScopedFastFlag luauAttributeSyntax{FFlag::LuauAttributeSyntax, true};
-
     ParseOptions opts;
     opts.allowDeclarationSyntax = true;
 
-    ParseResult pr1 = tryParse(R"(
+    ParseResult pr1 = tryParse(
+        R"(
 @checked declare foo: number
     )",
-        opts);
+        opts
+    );
 
     checkFirstErrorForAttributes(
-        pr1.errors, 1, Location(Position(1, 17), Position(1, 20)), "Expected a function type declaration after attribute, but got 'foo' instead");
+        pr1.errors, 1, Location(Position(1, 17), Position(1, 20)), "Expected a function type declaration after attribute, but got 'foo' instead"
+    );
 
-    ParseResult pr2 = tryParse(R"(
+    ParseResult pr2 = tryParse(
+        R"(
 @checked declare class Foo
     prop: number
     function method(self, foo: number): string
 end)",
-        opts);
+        opts
+    );
 
     checkFirstErrorForAttributes(
-        pr2.errors, 1, Location(Position(1, 17), Position(1, 22)), "Expected a function type declaration after attribute, but got 'class' instead");
+        pr2.errors, 1, Location(Position(1, 17), Position(1, 22)), "Expected a function type declaration after attribute, but got 'class' instead"
+    );
 
-    ParseResult pr3 = tryParse(R"(
+    ParseResult pr3 = tryParse(
+        R"(
 declare bit32: {
     band: @checked number
 })",
-        opts);
+        opts
+    );
 
     checkFirstErrorForAttributes(
-        pr3.errors, 1, Location(Position(2, 19), Position(2, 25)), "Expected '(' when parsing function parameters, got 'number'");
+        pr3.errors, 1, Location(Position(2, 19), Position(2, 25)), "Expected '(' when parsing function parameters, got 'number'"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "attributes_cannot_be_duplicated")
 {
-    ScopedFastFlag luauAttributeSyntax{FFlag::LuauAttributeSyntax, true};
-
     ParseResult result = tryParse(R"(
 @checked
     @checked
@@ -3531,8 +3763,6 @@ end)");
 
 TEST_CASE_FIXTURE(Fixture, "unsupported_attributes_are_not_allowed")
 {
-    ScopedFastFlag luauAttributeSyntax{FFlag::LuauAttributeSyntax, true};
-
     ParseResult result = tryParse(R"(
 @checked
     @cool_attribute
@@ -3545,25 +3775,174 @@ end)");
 
 TEST_CASE_FIXTURE(Fixture, "can_parse_leading_bar_unions_successfully")
 {
-    ScopedFastFlag sff{FFlag::LuauLeadingBarAndAmpersand2, true};
-
     parse(R"(type A = | "Hello" | "World")");
 }
 
 TEST_CASE_FIXTURE(Fixture, "can_parse_leading_ampersand_intersections_successfully")
 {
-    ScopedFastFlag sff{FFlag::LuauLeadingBarAndAmpersand2, true};
-
     parse(R"(type A = & { string } & { number })");
 }
 
 TEST_CASE_FIXTURE(Fixture, "mixed_leading_intersection_and_union_not_allowed")
 {
-    ScopedFastFlag sff{FFlag::LuauLeadingBarAndAmpersand2, true};
-
     matchParseError("type A = & number | string | boolean", "Mixing union and intersection types is not allowed; consider wrapping in parentheses.");
     matchParseError("type A = | number & string & boolean", "Mixing union and intersection types is not allowed; consider wrapping in parentheses.");
 }
 
+TEST_CASE_FIXTURE(Fixture, "grouped_function_type")
+{
+    ScopedFastFlag _{FFlag::LuauAllowComplexTypesInGenericParams, true};
+    const auto root = parse(R"(
+        type X<T> = T
+        local x: X<(() -> ())?>
+    )");
+    LUAU_ASSERT(root);
+    CHECK_EQ(root->body.size, 2);
+    auto assignment = root->body.data[1]->as<AstStatLocal>();
+    LUAU_ASSERT(assignment);
+    CHECK_EQ(assignment->vars.size, 1);
+    CHECK_EQ(assignment->values.size, 0);
+    auto binding = assignment->vars.data[0];
+    CHECK_EQ(binding->name, "x");
+    auto genericTy = binding->annotation->as<AstTypeReference>();
+    LUAU_ASSERT(genericTy);
+    CHECK_EQ(genericTy->parameters.size, 1);
+    auto paramTy = genericTy->parameters.data[0];
+    LUAU_ASSERT(paramTy.type);
+    auto unionTy = paramTy.type->as<AstTypeUnion>();
+    LUAU_ASSERT(unionTy);
+    CHECK_EQ(unionTy->types.size, 2);
+    if (FFlag::LuauAstTypeGroup3)
+    {
+        auto groupTy = unionTy->types.data[0]->as<AstTypeGroup>(); // (() -> ())
+        REQUIRE(groupTy);
+        CHECK(groupTy->type->is<AstTypeFunction>()); // () -> ()
+    }
+    else
+        CHECK(unionTy->types.data[0]->is<AstTypeFunction>()); // () -> ()
+    if (FFlag::LuauParseOptionalAsNode)
+        CHECK(unionTy->types.data[1]->is<AstTypeOptional>()); // ?
+    else
+        CHECK(unionTy->types.data[1]->is<AstTypeReference>()); // nil
+}
+
+TEST_CASE_FIXTURE(Fixture, "complex_union_in_generic_ty")
+{
+    ScopedFastFlag _{FFlag::LuauAllowComplexTypesInGenericParams, true};
+    const auto root = parse(R"(
+        type X<T> = T
+        local x: X<
+            | number
+            | boolean
+            | string
+        >
+    )");
+    LUAU_ASSERT(root);
+    CHECK_EQ(root->body.size, 2);
+    auto assignment = root->body.data[1]->as<AstStatLocal>();
+    LUAU_ASSERT(assignment);
+    CHECK_EQ(assignment->vars.size, 1);
+    CHECK_EQ(assignment->values.size, 0);
+    auto binding = assignment->vars.data[0];
+    CHECK_EQ(binding->name, "x");
+    auto genericTy = binding->annotation->as<AstTypeReference>();
+    LUAU_ASSERT(genericTy);
+    CHECK_EQ(genericTy->parameters.size, 1);
+    auto paramTy = genericTy->parameters.data[0];
+    LUAU_ASSERT(paramTy.type);
+    auto unionTy = paramTy.type->as<AstTypeUnion>();
+    LUAU_ASSERT(unionTy);
+    CHECK_EQ(unionTy->types.size, 3);
+    // NOTE: These are `const char*` so we can compare them to `AstName`s later.
+    std::vector<const char*> expectedTypes{"number", "boolean", "string"};
+    for (size_t i = 0; i < expectedTypes.size(); i++)
+    {
+        auto ty = unionTy->types.data[i]->as<AstTypeReference>();
+        LUAU_ASSERT(ty);
+        CHECK_EQ(ty->name, expectedTypes[i]);
+    }
+}
+
+TEST_CASE_FIXTURE(Fixture, "recover_from_bad_table_type")
+{
+    ScopedFastFlag _{FFlag::LuauErrorRecoveryForTableTypes, true};
+    ParseOptions opts;
+    opts.allowDeclarationSyntax = true;
+    const auto result = tryParse(
+        R"(
+        declare class Widget
+            state: {string: function(string, Widget)}
+        end
+    )",
+        opts
+    );
+    CHECK_EQ(result.errors.size(), 2);
+}
+
+TEST_CASE_FIXTURE(Fixture, "function_name_has_correct_start_location")
+{
+    ScopedFastFlag _{FFlag::LuauFixFunctionNameStartPosition, true};
+    AstStatBlock* block = parse(R"(
+        function simple()
+        end
+
+        function T:complex()
+        end
+    )");
+
+    REQUIRE_EQ(2, block->body.size);
+
+    const auto function1 = block->body.data[0]->as<AstStatFunction>();
+    LUAU_ASSERT(function1);
+    CHECK_EQ(Position{1, 17}, function1->name->location.begin);
+
+    const auto function2 = block->body.data[1]->as<AstStatFunction>();
+    LUAU_ASSERT(function2);
+    CHECK_EQ(Position{4, 17}, function2->name->location.begin);
+}
+
+TEST_CASE_FIXTURE(Fixture, "stat_end_includes_semicolon_position")
+{
+    ScopedFastFlag _{FFlag::LuauExtendStatEndPosWithSemicolon, true};
+    AstStatBlock* block = parse(R"(
+        local x = 1
+        local y = 2;
+        local z = 3  ;
+    )");
+
+    REQUIRE_EQ(3, block->body.size);
+
+    const auto stat1 = block->body.data[0];
+    LUAU_ASSERT(stat1);
+    CHECK_FALSE(stat1->hasSemicolon);
+    CHECK_EQ(Position{1, 19}, stat1->location.end);
+
+    const auto stat2 = block->body.data[1];
+    LUAU_ASSERT(stat2);
+    CHECK(stat2->hasSemicolon);
+    CHECK_EQ(Position{2, 20}, stat2->location.end);
+
+    const auto stat3 = block->body.data[2];
+    LUAU_ASSERT(stat3);
+    CHECK(stat3->hasSemicolon);
+    CHECK_EQ(Position{3, 22}, stat3->location.end);
+}
+
+TEST_CASE_FIXTURE(Fixture, "parsing_type_suffix_for_return_type_with_variadic")
+{
+    ParseResult result = tryParse(R"(
+        function foo(): (string, ...number) | boolean
+        end
+    )");
+
+    // TODO(CLI-140667): this should produce a ParseError in future when we fix the invalid syntax
+    CHECK(result.errors.size() == 0);
+}
+
+TEST_CASE_FIXTURE(Fixture, "parsing_string_union_indexers")
+{
+    ScopedFastFlag _{FFlag::LuauParseStringIndexer, true};
+    parse(R"(type foo = { ["bar" | "baz"]: number })");
+}
 
 TEST_SUITE_END();

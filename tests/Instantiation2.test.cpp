@@ -4,6 +4,7 @@
 
 #include "Fixture.h"
 #include "ClassFixture.h"
+#include "Luau/Type.h"
 #include "ScopedFlags.h"
 
 #include "doctest.h"
@@ -19,15 +20,17 @@ TEST_CASE_FIXTURE(Fixture, "weird_cyclic_instantiation")
 
     TypeId genericT = arena.addType(GenericType{"T"});
 
-    TypeId idTy = arena.addType(FunctionType{/* generics */ {genericT},
+    TypeId idTy = arena.addType(FunctionType{
+        /* generics */ {genericT},
         /* genericPacks */ {},
         /* argTypes */ arena.addTypePack({genericT}),
-        /* retTypes */ arena.addTypePack({genericT})});
+        /* retTypes */ arena.addTypePack({genericT})
+    });
 
     DenseHashMap<TypeId, TypeId> genericSubstitutions{nullptr};
     DenseHashMap<TypePackId, TypePackId> genericPackSubstitutions{nullptr};
 
-    TypeId freeTy = arena.freshType(&scope);
+    TypeId freeTy = arena.freshType(builtinTypes, &scope);
     FreeType* ft = getMutable<FreeType>(freeTy);
     REQUIRE(ft);
     ft->lowerBound = idTy;
@@ -42,10 +45,8 @@ TEST_CASE_FIXTURE(Fixture, "weird_cyclic_instantiation")
     // Substitutions should not mutate the original type!
     CHECK("<T>(T) -> T" == toString(idTy));
 
-    // Weird looking because we haven't properly clipped the generic from the
-    // function type, but this is what we asked for.
     REQUIRE(res);
-    CHECK("<<T>(T) -> T>(<T>(T) -> T) -> <T>(T) -> T" == toString(*res));
+    CHECK("<T>(T) -> T" == toString(*res));
 }
 
 TEST_SUITE_END();

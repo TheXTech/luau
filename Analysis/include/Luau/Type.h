@@ -31,9 +31,12 @@ namespace Luau
 struct TypeArena;
 struct Scope;
 using ScopePtr = std::shared_ptr<Scope>;
+struct Module;
 
 struct TypeFunction;
 struct Constraint;
+struct Subtyping;
+struct TypeChecker2;
 
 /**
  * There are three kinds of type variables:
@@ -66,11 +69,15 @@ using Name = std::string;
 // A free type is one whose exact shape has yet to be fully determined.
 struct FreeType
 {
+    // New constructors
+    explicit FreeType(TypeLevel level, TypeId lowerBound, TypeId upperBound);
+    // This one got promoted to explicit
+    explicit FreeType(Scope* scope, TypeId lowerBound, TypeId upperBound);
+    explicit FreeType(Scope* scope, TypeLevel level, TypeId lowerBound, TypeId upperBound);
+    // Old constructors
     explicit FreeType(TypeLevel level);
     explicit FreeType(Scope* scope);
     FreeType(Scope* scope, TypeLevel level);
-
-    FreeType(Scope* scope, TypeId lowerBound, TypeId upperBound);
 
     int index;
     TypeLevel level;
@@ -128,14 +135,14 @@ struct BlockedType
     BlockedType();
     int index;
 
-    Constraint* getOwner() const;
-    void setOwner(Constraint* newOwner);
-    void replaceOwner(Constraint* newOwner);
+    const Constraint* getOwner() const;
+    void setOwner(const Constraint* newOwner);
+    void replaceOwner(const Constraint* newOwner);
 
 private:
     // The constraint that is intended to unblock this type. Other constraints
     // should block on this constraint if present.
-    Constraint* owner = nullptr;
+    const Constraint* owner = nullptr;
 };
 
 struct PrimitiveType
@@ -276,9 +283,6 @@ struct WithPredicate
     }
 };
 
-using MagicFunction = std::function<std::optional<WithPredicate<TypePackId>>(
-    struct TypeChecker&, const std::shared_ptr<struct Scope>&, const class AstExprCall&, WithPredicate<TypePackId>)>;
-
 struct MagicFunctionCallContext
 {
     NotNull<struct ConstraintSolver> solver;
@@ -288,8 +292,6 @@ struct MagicFunctionCallContext
     TypePackId result;
 };
 
-using DcrMagicFunction = std::function<bool(MagicFunctionCallContext)>;
-
 struct MagicRefinementContext
 {
     NotNull<Scope> scope;
@@ -297,7 +299,38 @@ struct MagicRefinementContext
     std::vector<std::optional<TypeId>> discriminantTypes;
 };
 
-using DcrMagicRefinement = void (*)(const MagicRefinementContext&);
+struct MagicFunctionTypeCheckContext
+{
+    NotNull<TypeChecker2> typechecker;
+    NotNull<BuiltinTypes> builtinTypes;
+    const class AstExprCall* callSite;
+    TypePackId arguments;
+    NotNull<Scope> checkScope;
+};
+
+struct MagicFunction
+{
+    virtual std::optional<WithPredicate<TypePackId>>
+    handleOldSolver(struct TypeChecker&, const std::shared_ptr<struct Scope>&, const class AstExprCall&, WithPredicate<TypePackId>) = 0;
+
+    // Callback to allow custom typechecking of builtin function calls whose argument types
+    // will only be resolved after constraint solving. For example, the arguments to string.format
+    // have types that can only be decided after parsing the format string and unifying
+    // with the passed in values, but the correctness of the call can only be decided after
+    // all the types have been finalized.
+    virtual bool infer(const MagicFunctionCallContext&) = 0;
+    virtual void refine(const MagicRefinementContext&) {}
+
+    // If a magic function needs to do its own special typechecking, do it here.
+    // Returns true if magic typechecking was performed.  Return false if the
+    // default typechecking logic should run.
+    virtual bool typeCheck(const MagicFunctionTypeCheckContext&)
+    {
+        return false;
+    }
+
+    virtual ~MagicFunction() {}
+};
 
 struct FunctionType
 {
@@ -305,19 +338,46 @@ struct FunctionType
     FunctionType(TypePackId argTypes, TypePackId retTypes, std::optional<FunctionDefinition> defn = {}, bool hasSelf = false);
 
     // Global polymorphic function
-    FunctionType(std::vector<TypeId> generics, std::vector<TypePackId> genericPacks, TypePackId argTypes, TypePackId retTypes,
-        std::optional<FunctionDefinition> defn = {}, bool hasSelf = false);
+    FunctionType(
+        std::vector<TypeId> generics,
+        std::vector<TypePackId> genericPacks,
+        TypePackId argTypes,
+        TypePackId retTypes,
+        std::optional<FunctionDefinition> defn = {},
+        bool hasSelf = false
+    );
 
     // Local monomorphic function
     FunctionType(TypeLevel level, TypePackId argTypes, TypePackId retTypes, std::optional<FunctionDefinition> defn = {}, bool hasSelf = false);
     FunctionType(
-        TypeLevel level, Scope* scope, TypePackId argTypes, TypePackId retTypes, std::optional<FunctionDefinition> defn = {}, bool hasSelf = false);
+        TypeLevel level,
+        Scope* scope,
+        TypePackId argTypes,
+        TypePackId retTypes,
+        std::optional<FunctionDefinition> defn = {},
+        bool hasSelf = false
+    );
 
     // Local polymorphic function
-    FunctionType(TypeLevel level, std::vector<TypeId> generics, std::vector<TypePackId> genericPacks, TypePackId argTypes, TypePackId retTypes,
-        std::optional<FunctionDefinition> defn = {}, bool hasSelf = false);
-    FunctionType(TypeLevel level, Scope* scope, std::vector<TypeId> generics, std::vector<TypePackId> genericPacks, TypePackId argTypes,
-        TypePackId retTypes, std::optional<FunctionDefinition> defn = {}, bool hasSelf = false);
+    FunctionType(
+        TypeLevel level,
+        std::vector<TypeId> generics,
+        std::vector<TypePackId> genericPacks,
+        TypePackId argTypes,
+        TypePackId retTypes,
+        std::optional<FunctionDefinition> defn = {},
+        bool hasSelf = false
+    );
+    FunctionType(
+        TypeLevel level,
+        Scope* scope,
+        std::vector<TypeId> generics,
+        std::vector<TypePackId> genericPacks,
+        TypePackId argTypes,
+        TypePackId retTypes,
+        std::optional<FunctionDefinition> defn = {},
+        bool hasSelf = false
+    );
 
     std::optional<FunctionDefinition> definition;
     /// These should all be generic
@@ -329,9 +389,8 @@ struct FunctionType
     Scope* scope = nullptr;
     TypePackId argTypes;
     TypePackId retTypes;
-    MagicFunction magicFunction = nullptr;
-    DcrMagicFunction dcrMagicFunction = nullptr;
-    DcrMagicRefinement dcrMagicRefinement = nullptr;
+    std::shared_ptr<MagicFunction> magic = nullptr;
+
     bool hasSelf;
     // `hasNoFreeOrGenericTypes` should be true if and only if the type does not have any free or generic types present inside it.
     // this flag is used as an optimization to exit early from procedures that manipulate free or generic types.
@@ -398,9 +457,15 @@ struct Property
     // DEPRECATED
     // TODO: Kill all constructors in favor of `Property::rw(TypeId read, TypeId write)` and friends.
     Property();
-    Property(TypeId readTy, bool deprecated = false, const std::string& deprecatedSuggestion = "", std::optional<Location> location = std::nullopt,
-        const Tags& tags = {}, const std::optional<std::string>& documentationSymbol = std::nullopt,
-        std::optional<Location> typeLocation = std::nullopt);
+    Property(
+        TypeId readTy,
+        bool deprecated = false,
+        const std::string& deprecatedSuggestion = "",
+        std::optional<Location> location = std::nullopt,
+        const Tags& tags = {},
+        const std::optional<std::string>& documentationSymbol = std::nullopt,
+        std::optional<Location> typeLocation = std::nullopt
+    );
 
     // DEPRECATED: Should only be called in non-RWP! We assert that the `readTy` is not nullopt.
     // TODO: Kill once we don't have non-RWP.
@@ -502,8 +567,16 @@ struct ClassType
     std::optional<Location> definitionLocation;
     std::optional<TableIndexer> indexer;
 
-    ClassType(Name name, Props props, std::optional<TypeId> parent, std::optional<TypeId> metatable, Tags tags,
-        std::shared_ptr<ClassUserData> userData, ModuleName definitionModuleName, std::optional<Location> definitionLocation)
+    ClassType(
+        Name name,
+        Props props,
+        std::optional<TypeId> parent,
+        std::optional<TypeId> metatable,
+        Tags tags,
+        std::shared_ptr<ClassUserData> userData,
+        ModuleName definitionModuleName,
+        std::optional<Location> definitionLocation
+    )
         : name(name)
         , props(props)
         , parent(parent)
@@ -515,9 +588,17 @@ struct ClassType
     {
     }
 
-    ClassType(Name name, Props props, std::optional<TypeId> parent, std::optional<TypeId> metatable, Tags tags,
-        std::shared_ptr<ClassUserData> userData, ModuleName definitionModuleName, std::optional<Location> definitionLocation,
-        std::optional<TableIndexer> indexer)
+    ClassType(
+        Name name,
+        Props props,
+        std::optional<TypeId> parent,
+        std::optional<TypeId> metatable,
+        Tags tags,
+        std::shared_ptr<ClassUserData> userData,
+        ModuleName definitionModuleName,
+        std::optional<Location> definitionLocation,
+        std::optional<TableIndexer> indexer
+    )
         : name(name)
         , props(props)
         , parent(parent)
@@ -529,6 +610,18 @@ struct ClassType
         , indexer(indexer)
     {
     }
+};
+
+// Data required to initialize a user-defined function and its environment
+struct UserDefinedFunctionData
+{
+    // Store a weak module reference to ensure the lifetime requirements are preserved
+    std::weak_ptr<Module> owner;
+
+    // References to AST elements are owned by the Module allocator which also stores this type
+    AstStatTypeFunction* definition = nullptr;
+
+    DenseHashMap<Name, std::pair<AstStatTypeFunction*, size_t>> environment{""};
 };
 
 /**
@@ -545,10 +638,21 @@ struct TypeFunctionInstanceType
     std::vector<TypeId> typeArguments;
     std::vector<TypePackId> packArguments;
 
-    TypeFunctionInstanceType(NotNull<const TypeFunction> function, std::vector<TypeId> typeArguments, std::vector<TypePackId> packArguments)
+    std::optional<AstName> userFuncName; // Name of the user-defined type function; only available for UDTFs
+    UserDefinedFunctionData userFuncData;
+
+    TypeFunctionInstanceType(
+        NotNull<const TypeFunction> function,
+        std::vector<TypeId> typeArguments,
+        std::vector<TypePackId> packArguments,
+        std::optional<AstName> userFuncName,
+        UserDefinedFunctionData userFuncData
+    )
         : function(function)
         , typeArguments(typeArguments)
         , packArguments(packArguments)
+        , userFuncName(userFuncName)
+        , userFuncData(userFuncData)
     {
     }
 
@@ -561,6 +665,13 @@ struct TypeFunctionInstanceType
 
     TypeFunctionInstanceType(const TypeFunction& function, std::vector<TypeId> typeArguments, std::vector<TypePackId> packArguments)
         : function{&function}
+        , typeArguments(typeArguments)
+        , packArguments(packArguments)
+    {
+    }
+
+    TypeFunctionInstanceType(NotNull<const TypeFunction> function, std::vector<TypeId> typeArguments, std::vector<TypePackId> packArguments)
+        : function{function}
         , typeArguments(typeArguments)
         , packArguments(packArguments)
     {
@@ -589,6 +700,11 @@ struct PendingExpansionType
 
 // Anything!  All static checking is off.
 struct AnyType
+{
+};
+
+// A special, trivial type for the refinement system that is always eliminated from intersections.
+struct NoRefineType
 {
 };
 
@@ -659,11 +775,29 @@ struct NegationType
     TypeId ty;
 };
 
-using ErrorType = Unifiable::Error;
+using ErrorType = Unifiable::Error<TypeId>;
 
-using TypeVariant =
-    Unifiable::Variant<TypeId, FreeType, GenericType, PrimitiveType, SingletonType, BlockedType, PendingExpansionType, FunctionType, TableType,
-        MetatableType, ClassType, AnyType, UnionType, IntersectionType, LazyType, UnknownType, NeverType, NegationType, TypeFunctionInstanceType>;
+using TypeVariant = Unifiable::Variant<
+    TypeId,
+    FreeType,
+    GenericType,
+    PrimitiveType,
+    SingletonType,
+    BlockedType,
+    PendingExpansionType,
+    FunctionType,
+    TableType,
+    MetatableType,
+    ClassType,
+    AnyType,
+    UnionType,
+    IntersectionType,
+    LazyType,
+    UnknownType,
+    NeverType,
+    NegationType,
+    NoRefineType,
+    TypeFunctionInstanceType>;
 
 struct Type final
 {
@@ -708,6 +842,13 @@ struct Type final
     Type& operator=(const TypeVariant& rhs);
     Type& operator=(TypeVariant&& rhs);
 
+    Type(Type&&) = default;
+    Type& operator=(Type&&) = default;
+
+    Type clone() const;
+
+private:
+    Type(const Type&) = default;
     Type& operator=(const Type& rhs);
 };
 
@@ -857,6 +998,7 @@ public:
     const TypeId unknownType;
     const TypeId neverType;
     const TypeId errorType;
+    const TypeId noRefineType;
     const TypeId falsyType;
     const TypeId truthyType;
 
@@ -1063,6 +1205,10 @@ TypeId freshType(NotNull<TypeArena> arena, NotNull<BuiltinTypes> builtinTypes, S
 
 using TypeIdPredicate = std::function<std::optional<TypeId>(TypeId)>;
 std::vector<TypeId> filterMap(TypeId type, TypeIdPredicate predicate);
+
+// A tag to mark a type which doesn't derive directly from the root type as overriding the return of `typeof`.
+// Any classes which derive from this type will have typeof return this type.
+static constexpr char kTypeofRootTag[] = "typeofRoot";
 
 void attachTag(TypeId ty, const std::string& tagName);
 void attachTag(Property& prop, const std::string& tagName);

@@ -9,7 +9,8 @@ using std::nullopt;
 namespace Luau
 {
 
-ClassFixture::ClassFixture()
+ClassFixture::ClassFixture(bool prepareAutocomplete)
+    : BuiltinsFixture(prepareAutocomplete)
 {
     GlobalTypes& globals = frontend.globals;
     TypeArena& arena = globals.globalTypes;
@@ -29,7 +30,8 @@ ClassFixture::ClassFixture()
     };
 
     getMutable<ClassType>(connectionType)->props = {
-        {"Connect", {makeFunction(arena, connectionType, {makeFunction(arena, nullopt, {baseClassInstanceType}, {})}, {})}}};
+        {"Connect", {makeFunction(arena, connectionType, {makeFunction(arena, nullopt, {baseClassInstanceType}, {})}, {})}}
+    };
 
     TypeId baseClassType = arena.addType(ClassType{"BaseClass", {}, nullopt, nullopt, {}, {}, "Test", {}});
     getMutable<ClassType>(baseClassType)->props = {
@@ -102,10 +104,12 @@ ClassFixture::ClassFixture()
     };
     getMutable<TableType>(vector2MetaType)->props = {
         {"__add", {makeFunction(arena, nullopt, {vector2InstanceType, vector2InstanceType}, {vector2InstanceType})}},
-        {"__mul", {arena.addType(IntersectionType{{
-                      makeFunction(arena, vector2InstanceType, {vector2InstanceType}, {vector2InstanceType}),
-                      makeFunction(arena, vector2InstanceType, {builtinTypes->numberType}, {vector2InstanceType}),
-                  }})}}};
+        {"__mul",
+         {arena.addType(IntersectionType{{
+             makeFunction(arena, vector2InstanceType, {vector2InstanceType}, {vector2InstanceType}),
+             makeFunction(arena, vector2InstanceType, {builtinTypes->numberType}, {vector2InstanceType}),
+         }})}}
+    };
     globals.globalScope->exportedTypeBindings["Vector2"] = TypeFun{{}, vector2InstanceType};
     addGlobalBinding(globals, "Vector2", vector2Type, "@test");
 
@@ -116,7 +120,8 @@ ClassFixture::ClassFixture()
     };
     globals.globalScope->exportedTypeBindings["CallableClass"] = TypeFun{{}, callableClassType};
 
-    auto addIndexableClass = [&arena, &globals](const char* className, TypeId keyType, TypeId returnType) {
+    auto addIndexableClass = [&arena, &globals](const char* className, TypeId keyType, TypeId returnType)
+    {
         TypeId indexableClassMetaType = arena.addType(TableType{});
         TypeId indexableClassType =
             arena.addType(ClassType{className, {}, nullopt, indexableClassMetaType, {}, {}, "Test", {}, TableIndexer{keyType, returnType}});
@@ -127,6 +132,15 @@ ClassFixture::ClassFixture()
     addIndexableClass("IndexableClass", arena.addType(Luau::UnionType{{stringType, numberType}}), numberType);
     // IndexableNumericKeyClass has a table indexer with a key type of 'number' and a return type of 'number'
     addIndexableClass("IndexableNumericKeyClass", numberType, numberType);
+
+    // Add a confusing derived class which shares the same name internally, but has a unique alias
+    TypeId duplicateBaseClassInstanceType = arena.addType(ClassType{"BaseClass", {}, baseClassInstanceType, nullopt, {}, {}, "Test", {}});
+
+    getMutable<ClassType>(duplicateBaseClassInstanceType)->props = {
+        {"Method", {makeFunction(arena, duplicateBaseClassInstanceType, {}, {stringType})}},
+    };
+
+    addGlobalBinding(globals, "confusingBaseClassInstance", duplicateBaseClassInstanceType, "@test");
 
     for (const auto& [name, tf] : globals.globalScope->exportedTypeBindings)
         persist(tf.type);

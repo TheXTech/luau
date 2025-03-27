@@ -3,6 +3,8 @@
 
 #include <cstddef>
 #include <functional>
+#include <unordered_set>
+#include <vector>
 
 namespace Luau::EqSat
 {
@@ -16,7 +18,7 @@ struct LanguageHash
     }
 };
 
-template <typename T>
+template<typename T>
 size_t languageHash(const T& lang)
 {
     return LanguageHash<T>{}(lang);

@@ -8,6 +8,7 @@
 #include "Luau/StringUtils.h"
 #include "Luau/ToString.h"
 #include "Luau/Type.h"
+#include "Luau/TypeChecker2.h"
 #include "Luau/TypeFunction.h"
 
 #include <optional>
@@ -17,11 +18,15 @@
 #include <unordered_set>
 
 LUAU_FASTINTVARIABLE(LuauIndentTypeMismatchMaxTypeLength, 10)
-
-LUAU_DYNAMIC_FASTFLAGVARIABLE(LuauImproveNonFunctionCallError, false)
+LUAU_FASTFLAG(LuauNonStrictFuncDefErrorFix)
 
 static std::string wrongNumberOfArgsString(
-    size_t expectedCount, std::optional<size_t> maximumCount, size_t actualCount, const char* argPrefix = nullptr, bool isVariadic = false)
+    size_t expectedCount,
+    std::optional<size_t> maximumCount,
+    size_t actualCount,
+    const char* argPrefix = nullptr,
+    bool isVariadic = false
+)
 {
     std::string s = "expects ";
 
@@ -65,8 +70,21 @@ namespace Luau
 {
 
 // this list of binary operator type functions is used for better stringification of type functions errors
-static const std::unordered_map<std::string, const char*> kBinaryOps{{"add", "+"}, {"sub", "-"}, {"mul", "*"}, {"div", "/"}, {"idiv", "//"},
-    {"pow", "^"}, {"mod", "%"}, {"concat", ".."}, {"and", "and"}, {"or", "or"}, {"lt", "< or >="}, {"le", "<= or >"}, {"eq", "== or ~="}};
+static const std::unordered_map<std::string, const char*> kBinaryOps{
+    {"add", "+"},
+    {"sub", "-"},
+    {"mul", "*"},
+    {"div", "/"},
+    {"idiv", "//"},
+    {"pow", "^"},
+    {"mod", "%"},
+    {"concat", ".."},
+    {"and", "and"},
+    {"or", "or"},
+    {"lt", "< or >="},
+    {"le", "<= or >"},
+    {"eq", "== or ~="}
+};
 
 // this list of unary operator type functions is used for better stringification of type functions errors
 static const std::unordered_map<std::string, const char*> kUnaryOps{{"unm", "-"}, {"len", "#"}, {"not", "not"}};
@@ -86,18 +104,24 @@ struct ErrorConverter
 
         std::string result;
 
-        auto quote = [&](std::string s) {
+        auto quote = [&](std::string s)
+        {
             return "'" + s + "'";
         };
 
-        auto constructErrorMessage = [&](std::string givenType, std::string wantedType, std::optional<std::string> givenModule,
-                                         std::optional<std::string> wantedModule) -> std::string {
+        auto constructErrorMessage =
+            [&](std::string givenType, std::string wantedType, std::optional<std::string> givenModule, std::optional<std::string> wantedModule
+            ) -> std::string
+        {
             std::string given = givenModule ? quote(givenType) + " from " + quote(*givenModule) : quote(givenType);
             std::string wanted = wantedModule ? quote(wantedType) + " from " + quote(*wantedModule) : quote(wantedType);
             size_t luauIndentTypeMismatchMaxTypeLength = size_t(FInt::LuauIndentTypeMismatchMaxTypeLength);
             if (givenType.length() <= luauIndentTypeMismatchMaxTypeLength || wantedType.length() <= luauIndentTypeMismatchMaxTypeLength)
                 return "Type " + given + " could not be converted into " + wanted;
-            return "Type\n    " + given + "\ncould not be converted into\n    " + wanted;
+            if (FFlag::LuauImproveTypePathsInErrors)
+                return "Type\n\t" + given + "\ncould not be converted into\n\t" + wanted;
+            else
+                return "Type\n    " + given + "\ncould not be converted into\n    " + wanted;
         };
 
         if (givenTypeName == wantedTypeName)
@@ -351,6 +375,11 @@ struct ErrorConverter
         return e.message;
     }
 
+    std::string operator()(const Luau::ConstraintSolvingIncompleteError& e) const
+    {
+        return "Type inference failed to complete, you may see some confusing types and type errors.";
+    }
+
     std::optional<TypeId> findCallMetamethod(TypeId type) const
     {
         type = follow(type);
@@ -382,35 +411,30 @@ struct ErrorConverter
 
     std::string operator()(const Luau::CannotCallNonFunction& e) const
     {
-        if (DFFlag::LuauImproveNonFunctionCallError)
+        if (auto unionTy = get<UnionType>(follow(e.ty)))
         {
-            if (auto unionTy = get<UnionType>(follow(e.ty)))
+            std::string err = "Cannot call a value of the union type:";
+
+            for (auto option : unionTy)
             {
-                std::string err = "Cannot call a value of the union type:";
+                option = follow(option);
 
-                for (auto option : unionTy)
+                if (get<FunctionType>(option) || findCallMetamethod(option))
                 {
-                    option = follow(option);
-
-                    if (get<FunctionType>(option) || findCallMetamethod(option))
-                    {
-                        err += "\n  | " + toString(option);
-                        continue;
-                    }
-
-                    // early-exit if we find something that isn't callable in the union.
-                    return "Cannot call a value of type " + toString(option) + " in union:\n  " + toString(e.ty);
+                    err += "\n  | " + toString(option);
+                    continue;
                 }
 
-                err += "\nWe are unable to determine the appropriate result type for such a call.";
-
-                return err;
+                // early-exit if we find something that isn't callable in the union.
+                return "Cannot call a value of type " + toString(option) + " in union:\n  " + toString(e.ty);
             }
 
-            return "Cannot call a value of type " + toString(e.ty);
+            err += "\nWe are unable to determine the appropriate result type for such a call.";
+
+            return err;
         }
 
-        return "Cannot call non-function " + toString(e.ty);
+        return "Cannot call a value of type " + toString(e.ty);
     }
     std::string operator()(const Luau::ExtraInformation& e) const
     {
@@ -732,8 +756,15 @@ struct ErrorConverter
 
     std::string operator()(const NonStrictFunctionDefinitionError& e) const
     {
-        return "Argument " + e.argument + " with type '" + toString(e.argumentType) + "' in function '" + e.functionName +
-               "' is used in a way that will run time error";
+        if (FFlag::LuauNonStrictFuncDefErrorFix && e.functionName.empty())
+        {
+            return "Argument " + e.argument + " with type '" + toString(e.argumentType) + "' is used in a way that will run time error";
+        }
+        else
+        {
+            return "Argument " + e.argument + " with type '" + toString(e.argumentType) + "' in function '" + e.functionName +
+                   "' is used in a way that will run time error";
+        }
     }
 
     std::string operator()(const PropertyAccessViolation& e) const
@@ -765,6 +796,11 @@ struct ErrorConverter
     std::string operator()(const UnexpectedTypePackInSubtyping& e) const
     {
         return "Encountered an unexpected type pack in subtyping: " + toString(e.tp);
+    }
+
+    std::string operator()(const UserDefinedTypeFunctionError& e) const
+    {
+        return e.message;
     }
 
     std::string operator()(const CannotAssignToNever& e) const
@@ -987,6 +1023,11 @@ bool InternalError::operator==(const InternalError& rhs) const
     return message == rhs.message;
 }
 
+bool ConstraintSolvingIncompleteError::operator==(const ConstraintSolvingIncompleteError& rhs) const
+{
+    return true;
+}
+
 bool CannotCallNonFunction::operator==(const CannotCallNonFunction& rhs) const
 {
     return ty == rhs.ty;
@@ -1144,6 +1185,11 @@ bool UnexpectedTypePackInSubtyping::operator==(const UnexpectedTypePackInSubtypi
     return tp == rhs.tp;
 }
 
+bool UserDefinedTypeFunctionError::operator==(const UserDefinedTypeFunctionError& rhs) const
+{
+    return message == rhs.message;
+}
+
 bool CannotAssignToNever::operator==(const CannotAssignToNever& rhs) const
 {
     if (cause.size() != rhs.cause.size())
@@ -1177,11 +1223,13 @@ bool containsParseErrorName(const TypeError& error)
 template<typename T>
 void copyError(T& e, TypeArena& destArena, CloneState& cloneState)
 {
-    auto clone = [&](auto&& ty) {
+    auto clone = [&](auto&& ty)
+    {
         return ::Luau::clone(ty, destArena, cloneState);
     };
 
-    auto visitErrorData = [&](auto&& e) {
+    auto visitErrorData = [&](auto&& e)
+    {
         copyError(e, destArena, cloneState);
     };
 
@@ -1254,6 +1302,9 @@ void copyError(T& e, TypeArena& destArena, CloneState& cloneState)
     {
     }
     else if constexpr (std::is_same_v<T, InternalError>)
+    {
+    }
+    else if constexpr (std::is_same_v<T, ConstraintSolvingIncompleteError>)
     {
     }
     else if constexpr (std::is_same_v<T, CannotCallNonFunction>)
@@ -1348,6 +1399,9 @@ void copyError(T& e, TypeArena& destArena, CloneState& cloneState)
         e.ty = clone(e.ty);
     else if constexpr (std::is_same_v<T, UnexpectedTypePackInSubtyping>)
         e.tp = clone(e.tp);
+    else if constexpr (std::is_same_v<T, UserDefinedTypeFunctionError>)
+    {
+    }
     else if constexpr (std::is_same_v<T, CannotAssignToNever>)
     {
         e.rhsType = clone(e.rhsType);
@@ -1363,7 +1417,8 @@ void copyErrors(ErrorVec& errors, TypeArena& destArena, NotNull<BuiltinTypes> bu
 {
     CloneState cloneState{builtinTypes};
 
-    auto visitErrorData = [&](auto&& e) {
+    auto visitErrorData = [&](auto&& e)
+    {
         copyError(e, destArena, cloneState);
     };
 

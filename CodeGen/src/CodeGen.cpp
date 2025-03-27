@@ -3,7 +3,7 @@
 
 #include "CodeGenLower.h"
 
-#include "Luau/Common.h"
+#include "Luau/CodeGenCommon.h"
 #include "Luau/CodeAllocator.h"
 #include "Luau/CodeBlockUnwind.h"
 #include "Luau/IrBuilder.h"
@@ -41,9 +41,9 @@
 #endif
 #endif
 
-LUAU_FASTFLAGVARIABLE(DebugCodegenNoOpt, false)
-LUAU_FASTFLAGVARIABLE(DebugCodegenOptSize, false)
-LUAU_FASTFLAGVARIABLE(DebugCodegenSkipNumbering, false)
+LUAU_FASTFLAGVARIABLE(DebugCodegenNoOpt)
+LUAU_FASTFLAGVARIABLE(DebugCodegenOptSize)
+LUAU_FASTFLAGVARIABLE(DebugCodegenSkipNumbering)
 
 // Per-module IR instruction count limit
 LUAU_FASTINTVARIABLE(CodegenHeuristicsInstructionLimit, 1'048'576) // 1 M
@@ -109,29 +109,34 @@ void onDisable(lua_State* L, Proto* proto)
 
     // walk all thread call stacks and clear the LUA_CALLINFO_NATIVE flag from any
     // entries pointing to the current proto that has native code enabled.
-    luaM_visitgco(L, proto, [](void* context, lua_Page* page, GCObject* gco) {
-        Proto* proto = (Proto*)context;
-
-        if (gco->gch.tt != LUA_TTHREAD)
-            return false;
-
-        lua_State* th = gco2th(gco);
-
-        for (CallInfo* ci = th->ci; ci > th->base_ci; ci--)
+    luaM_visitgco(
+        L,
+        proto,
+        [](void* context, lua_Page* page, GCObject* gco)
         {
-            if (isLua(ci))
-            {
-                Proto* p = clvalue(ci->func)->l.p;
+            Proto* proto = (Proto*)context;
 
-                if (p == proto)
+            if (gco->gch.tt != LUA_TTHREAD)
+                return false;
+
+            lua_State* th = gco2th(gco);
+
+            for (CallInfo* ci = th->ci; ci > th->base_ci; ci--)
+            {
+                if (isLua(ci))
                 {
-                    ci->flags &= ~LUA_CALLINFO_NATIVE;
+                    Proto* p = clvalue(ci->func)->l.p;
+
+                    if (p == proto)
+                    {
+                        ci->flags &= ~LUA_CALLINFO_NATIVE;
+                    }
                 }
             }
-        }
 
-        return false;
-    });
+            return false;
+        }
+    );
 }
 
 #if defined(CODEGEN_TARGET_A64)

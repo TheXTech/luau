@@ -2,7 +2,7 @@
 #include "Luau/BytecodeAnalysis.h"
 
 #include "Luau/BytecodeUtils.h"
-#include "Luau/CodeGen.h"
+#include "Luau/CodeGenOptions.h"
 #include "Luau/IrData.h"
 #include "Luau/IrUtils.h"
 
@@ -10,8 +10,6 @@
 #include "lstate.h"
 
 #include <algorithm>
-
-LUAU_FASTFLAGVARIABLE(LuauCodegenFastcall3, false)
 
 namespace Luau
 {
@@ -116,12 +114,17 @@ void loadBytecodeTypeInfo(IrFunction& function)
 static void prepareRegTypeInfoLookups(BytecodeTypeInfo& typeInfo)
 {
     // Sort by register first, then by end PC
-    std::sort(typeInfo.regTypes.begin(), typeInfo.regTypes.end(), [](const BytecodeRegTypeInfo& a, const BytecodeRegTypeInfo& b) {
-        if (a.reg != b.reg)
-            return a.reg < b.reg;
+    std::sort(
+        typeInfo.regTypes.begin(),
+        typeInfo.regTypes.end(),
+        [](const BytecodeRegTypeInfo& a, const BytecodeRegTypeInfo& b)
+        {
+            if (a.reg != b.reg)
+                return a.reg < b.reg;
 
-        return a.endpc < b.endpc;
-    });
+            return a.endpc < b.endpc;
+        }
+    );
 
     // Prepare data for all registers as 'regTypes' might be missing temporaries
     typeInfo.regTypeOffsets.resize(256 + 1);
@@ -232,7 +235,7 @@ static uint8_t getBytecodeConstantTag(Proto* proto, unsigned ki)
     return LBC_TYPE_ANY;
 }
 
-static void applyBuiltinCall(int bfid, BytecodeTypes& types)
+static void applyBuiltinCall(LuauBuiltinFunction bfid, BytecodeTypes& types)
 {
     switch (bfid)
     {
@@ -511,6 +514,46 @@ static void applyBuiltinCall(int bfid, BytecodeTypes& types)
         types.result = LBC_TYPE_TABLE;
         types.a = LBC_TYPE_TABLE;
         types.b = LBC_TYPE_TABLE;
+        break;
+    case LBF_VECTOR_MAGNITUDE:
+        types.result = LBC_TYPE_NUMBER;
+        types.a = LBC_TYPE_VECTOR;
+        break;
+    case LBF_VECTOR_NORMALIZE:
+        types.result = LBC_TYPE_VECTOR;
+        types.a = LBC_TYPE_VECTOR;
+        break;
+    case LBF_VECTOR_CROSS:
+        types.result = LBC_TYPE_VECTOR;
+        types.a = LBC_TYPE_VECTOR;
+        types.b = LBC_TYPE_VECTOR;
+        break;
+    case LBF_VECTOR_DOT:
+        types.result = LBC_TYPE_NUMBER;
+        types.a = LBC_TYPE_VECTOR;
+        types.b = LBC_TYPE_VECTOR;
+        break;
+    case LBF_VECTOR_FLOOR:
+    case LBF_VECTOR_CEIL:
+    case LBF_VECTOR_ABS:
+    case LBF_VECTOR_SIGN:
+    case LBF_VECTOR_CLAMP:
+        types.result = LBC_TYPE_VECTOR;
+        types.a = LBC_TYPE_VECTOR;
+        types.b = LBC_TYPE_VECTOR;
+        break;
+    case LBF_VECTOR_MIN:
+    case LBF_VECTOR_MAX:
+        types.result = LBC_TYPE_VECTOR;
+        types.a = LBC_TYPE_VECTOR;
+        types.b = LBC_TYPE_VECTOR;
+        types.c = LBC_TYPE_VECTOR; // We can mark optional arguments
+        break;
+    case LBF_MATH_LERP:
+        types.result = LBC_TYPE_NUMBER;
+        types.a = LBC_TYPE_NUMBER;
+        types.b = LBC_TYPE_NUMBER;
+        types.c = LBC_TYPE_NUMBER;
         break;
     }
 }
@@ -1057,7 +1100,7 @@ void analyzeBytecodeTypes(IrFunction& function, const HostIrHooks& hostHooks)
                 CODEGEN_ASSERT(LUAU_INSN_OP(call) == LOP_CALL);
                 int ra = LUAU_INSN_A(call);
 
-                applyBuiltinCall(bfid, bcType);
+                applyBuiltinCall(LuauBuiltinFunction(bfid), bcType);
                 regTags[ra + 1] = bcType.a;
                 regTags[ra + 2] = bcType.b;
                 regTags[ra + 3] = bcType.c;
@@ -1076,7 +1119,7 @@ void analyzeBytecodeTypes(IrFunction& function, const HostIrHooks& hostHooks)
                 CODEGEN_ASSERT(LUAU_INSN_OP(call) == LOP_CALL);
                 int ra = LUAU_INSN_A(call);
 
-                applyBuiltinCall(bfid, bcType);
+                applyBuiltinCall(LuauBuiltinFunction(bfid), bcType);
 
                 regTags[LUAU_INSN_B(*pc)] = bcType.a;
                 regTags[ra] = bcType.result;
@@ -1093,7 +1136,7 @@ void analyzeBytecodeTypes(IrFunction& function, const HostIrHooks& hostHooks)
                 CODEGEN_ASSERT(LUAU_INSN_OP(call) == LOP_CALL);
                 int ra = LUAU_INSN_A(call);
 
-                applyBuiltinCall(bfid, bcType);
+                applyBuiltinCall(LuauBuiltinFunction(bfid), bcType);
 
                 regTags[LUAU_INSN_B(*pc)] = bcType.a;
                 regTags[int(pc[1])] = bcType.b;
@@ -1104,8 +1147,6 @@ void analyzeBytecodeTypes(IrFunction& function, const HostIrHooks& hostHooks)
             }
             case LOP_FASTCALL3:
             {
-                CODEGEN_ASSERT(FFlag::LuauCodegenFastcall3);
-
                 int bfid = LUAU_INSN_A(*pc);
                 int skip = LUAU_INSN_C(*pc);
                 int aux = pc[1];
@@ -1114,7 +1155,7 @@ void analyzeBytecodeTypes(IrFunction& function, const HostIrHooks& hostHooks)
                 CODEGEN_ASSERT(LUAU_INSN_OP(call) == LOP_CALL);
                 int ra = LUAU_INSN_A(call);
 
-                applyBuiltinCall(bfid, bcType);
+                applyBuiltinCall(LuauBuiltinFunction(bfid), bcType);
 
                 regTags[LUAU_INSN_B(*pc)] = bcType.a;
                 regTags[aux & 0xff] = bcType.b;

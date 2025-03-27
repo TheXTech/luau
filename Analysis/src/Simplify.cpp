@@ -2,6 +2,7 @@
 
 #include "Luau/Simplify.h"
 
+#include "Luau/Common.h"
 #include "Luau/DenseHash.h"
 #include "Luau/RecursionCounter.h"
 #include "Luau/Set.h"
@@ -12,8 +13,9 @@
 #include <algorithm>
 
 LUAU_FASTINT(LuauTypeReductionRecursionLimit)
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution)
+LUAU_FASTFLAG(LuauSolverV2)
 LUAU_DYNAMIC_FASTINTVARIABLE(LuauSimplificationComplexityLimit, 8);
+LUAU_FASTFLAGVARIABLE(LuauFlagBasicIntersectFollows);
 
 namespace Luau
 {
@@ -29,16 +31,16 @@ struct TypeSimplifier
 
     int recursionDepth = 0;
 
-    TypeId mkNegation(TypeId ty);
+    TypeId mkNegation(TypeId ty) const;
 
     TypeId intersectFromParts(std::set<TypeId> parts);
 
-    TypeId intersectUnionWithType(TypeId unionTy, TypeId right);
+    TypeId intersectUnionWithType(TypeId left, TypeId right);
     TypeId intersectUnions(TypeId left, TypeId right);
-    TypeId intersectNegatedUnion(TypeId unionTy, TypeId right);
+    TypeId intersectNegatedUnion(TypeId left, TypeId right);
 
-    TypeId intersectTypeWithNegation(TypeId a, TypeId b);
-    TypeId intersectNegations(TypeId a, TypeId b);
+    TypeId intersectTypeWithNegation(TypeId left, TypeId right);
+    TypeId intersectNegations(TypeId left, TypeId right);
 
     TypeId intersectIntersectionWithType(TypeId left, TypeId right);
 
@@ -46,8 +48,8 @@ struct TypeSimplifier
     // unions, intersections, or negations.
     std::optional<TypeId> basicIntersect(TypeId left, TypeId right);
 
-    TypeId intersect(TypeId ty, TypeId discriminant);
-    TypeId union_(TypeId ty, TypeId discriminant);
+    TypeId intersect(TypeId left, TypeId right);
+    TypeId union_(TypeId left, TypeId right);
 
     TypeId simplify(TypeId ty);
     TypeId simplify(TypeId ty, DenseHashSet<TypeId>& seen);
@@ -141,6 +143,7 @@ Relation combine(Relation a, Relation b)
         case Relation::Superset:
             return Relation::Intersects;
         }
+        break;
     case Relation::Coincident:
         switch (b)
         {
@@ -155,6 +158,7 @@ Relation combine(Relation a, Relation b)
         case Relation::Superset:
             return Relation::Intersects;
         }
+        break;
     case Relation::Superset:
         switch (b)
         {
@@ -169,6 +173,7 @@ Relation combine(Relation a, Relation b)
         case Relation::Superset:
             return Relation::Superset;
         }
+        break;
     case Relation::Subset:
         switch (b)
         {
@@ -183,6 +188,7 @@ Relation combine(Relation a, Relation b)
         case Relation::Superset:
             return Relation::Intersects;
         }
+        break;
     case Relation::Intersects:
         switch (b)
         {
@@ -197,6 +203,7 @@ Relation combine(Relation a, Relation b)
         case Relation::Superset:
             return Relation::Intersects;
         }
+        break;
     }
 
     LUAU_UNREACHABLE();
@@ -238,12 +245,22 @@ Relation relateTables(TypeId left, TypeId right, SimplifierSeenSet& seen)
     LUAU_ASSERT(1 == rightTable->props.size());
     // Disjoint props have nothing in common
     // t1 with props p1's cannot appear in t2 and t2 with props p2's cannot appear in t1
-    bool foundPropFromLeftInRight = std::any_of(begin(leftTable->props), end(leftTable->props), [&](auto prop) {
-        return rightTable->props.count(prop.first) > 0;
-    });
-    bool foundPropFromRightInLeft = std::any_of(begin(rightTable->props), end(rightTable->props), [&](auto prop) {
-        return leftTable->props.count(prop.first) > 0;
-    });
+    bool foundPropFromLeftInRight = std::any_of(
+        begin(leftTable->props),
+        end(leftTable->props),
+        [&](auto prop)
+        {
+            return rightTable->props.count(prop.first) > 0;
+        }
+    );
+    bool foundPropFromRightInLeft = std::any_of(
+        begin(rightTable->props),
+        end(rightTable->props),
+        [&](auto prop)
+        {
+            return leftTable->props.count(prop.first) > 0;
+        }
+    );
 
     if (!foundPropFromLeftInRight && !foundPropFromRightInLeft && leftTable->props.size() >= 1 && rightTable->props.size() >= 1)
         return Relation::Disjoint;
@@ -556,7 +573,7 @@ Relation relate(TypeId left, TypeId right)
     return relate(left, right, seen);
 }
 
-TypeId TypeSimplifier::mkNegation(TypeId ty)
+TypeId TypeSimplifier::mkNegation(TypeId ty) const
 {
     TypeId result = nullptr;
 
@@ -1049,6 +1066,12 @@ TypeId TypeSimplifier::intersectIntersectionWithType(TypeId left, TypeId right)
 
 std::optional<TypeId> TypeSimplifier::basicIntersect(TypeId left, TypeId right)
 {
+    if (FFlag::LuauFlagBasicIntersectFollows)
+    {
+        left = follow(left);
+        right = follow(right);
+    }
+
     if (get<AnyType>(left) && get<ErrorType>(right))
         return right;
     if (get<AnyType>(right) && get<ErrorType>(left))
@@ -1112,8 +1135,13 @@ std::optional<TypeId> TypeSimplifier::basicIntersect(TypeId left, TypeId right)
                 {
                 case Relation::Disjoint:
                     return builtinTypes->neverType;
+                case Relation::Superset:
                 case Relation::Coincident:
                     return right;
+                case Relation::Subset:
+                    if (1 == rt->props.size())
+                        return left;
+                    break;
                 default:
                     break;
                 }
@@ -1121,6 +1149,34 @@ std::optional<TypeId> TypeSimplifier::basicIntersect(TypeId left, TypeId right)
         }
         else if (1 == rt->props.size())
             return basicIntersect(right, left);
+
+        // If two tables have disjoint properties and indexers, we can combine them.
+        if (!lt->indexer && !rt->indexer && lt->state == TableState::Sealed && rt->state == TableState::Sealed)
+        {
+            if (rt->props.empty())
+                return left;
+
+            bool areDisjoint = true;
+            for (const auto& [name, leftProp] : lt->props)
+            {
+                if (rt->props.count(name))
+                {
+                    areDisjoint = false;
+                    break;
+                }
+            }
+
+            if (areDisjoint)
+            {
+                TableType::Props mergedProps = lt->props;
+                for (const auto& [name, rightProp] : rt->props)
+                    mergedProps[name] = rightProp;
+
+                return arena->addType(TableType{mergedProps, std::nullopt, TypeLevel{}, lt->scope, TableState::Sealed});
+            }
+        }
+
+        return std::nullopt;
     }
 
     Relation relation = relate(left, right);
@@ -1355,8 +1411,6 @@ TypeId TypeSimplifier::simplify(TypeId ty, DenseHashSet<TypeId>& seen)
 
 SimplifyResult simplifyIntersection(NotNull<BuiltinTypes> builtinTypes, NotNull<TypeArena> arena, TypeId left, TypeId right)
 {
-    LUAU_ASSERT(FFlag::DebugLuauDeferredConstraintResolution);
-
     TypeSimplifier s{builtinTypes, arena};
 
     // fprintf(stderr, "Intersect %s and %s ...\n", toString(left).c_str(), toString(right).c_str());
@@ -1370,8 +1424,6 @@ SimplifyResult simplifyIntersection(NotNull<BuiltinTypes> builtinTypes, NotNull<
 
 SimplifyResult simplifyIntersection(NotNull<BuiltinTypes> builtinTypes, NotNull<TypeArena> arena, std::set<TypeId> parts)
 {
-    LUAU_ASSERT(FFlag::DebugLuauDeferredConstraintResolution);
-
     TypeSimplifier s{builtinTypes, arena};
 
     TypeId res = s.intersectFromParts(std::move(parts));
@@ -1381,8 +1433,6 @@ SimplifyResult simplifyIntersection(NotNull<BuiltinTypes> builtinTypes, NotNull<
 
 SimplifyResult simplifyUnion(NotNull<BuiltinTypes> builtinTypes, NotNull<TypeArena> arena, TypeId left, TypeId right)
 {
-    LUAU_ASSERT(FFlag::DebugLuauDeferredConstraintResolution);
-
     TypeSimplifier s{builtinTypes, arena};
 
     TypeId res = s.union_(left, right);

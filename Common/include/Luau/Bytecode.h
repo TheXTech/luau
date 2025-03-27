@@ -441,7 +441,7 @@ enum LuauBytecodeTag
     // Bytecode version; runtime supports [MIN, MAX], compiler emits TARGET by default but may emit a higher version when flags are enabled
     LBC_VERSION_MIN = 3,
     LBC_VERSION_MAX = 6,
-    LBC_VERSION_TARGET = 5,
+    LBC_VERSION_TARGET = 6,
     // Type encoding version
     LBC_TYPE_VERSION_MIN = 1,
     LBC_TYPE_VERSION_MAX = 3,
@@ -600,6 +600,22 @@ enum LuauBuiltinFunction
     LBF_BUFFER_WRITEF32,
     LBF_BUFFER_READF64,
     LBF_BUFFER_WRITEF64,
+
+    // vector.
+    LBF_VECTOR_MAGNITUDE,
+    LBF_VECTOR_NORMALIZE,
+    LBF_VECTOR_CROSS,
+    LBF_VECTOR_DOT,
+    LBF_VECTOR_FLOOR,
+    LBF_VECTOR_CEIL,
+    LBF_VECTOR_ABS,
+    LBF_VECTOR_SIGN,
+    LBF_VECTOR_CLAMP,
+    LBF_VECTOR_MIN,
+    LBF_VECTOR_MAX,
+
+    // math.lerp
+    LBF_MATH_LERP,
 };
 
 // Capture type, used in LOP_CAPTURE

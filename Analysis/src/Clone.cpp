@@ -1,16 +1,20 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/Clone.h"
 
+#include "Luau/Common.h"
 #include "Luau/NotNull.h"
 #include "Luau/Type.h"
 #include "Luau/TypePack.h"
 #include "Luau/Unifiable.h"
+#include "Luau/VisitType.h"
 
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution)
+LUAU_FASTFLAG(LuauSolverV2)
 
 // For each `Luau::clone` call, we will clone only up to N amount of types _and_ packs, as controlled by this limit.
 LUAU_FASTINTVARIABLE(LuauTypeCloneIterationLimit, 100'000)
-
+LUAU_FASTFLAGVARIABLE(LuauClonedTableAndFunctionTypesMustHaveScopes)
+LUAU_FASTFLAGVARIABLE(LuauDoNotClonePersistentBindings)
+LUAU_FASTFLAG(LuauIncrementalAutocompleteDemandBasedCloning)
 namespace Luau
 {
 
@@ -27,6 +31,8 @@ const T* get(const Kind& kind)
 
 class TypeCloner
 {
+
+protected:
     NotNull<TypeArena> arena;
     NotNull<BuiltinTypes> builtinTypes;
 
@@ -38,16 +44,30 @@ class TypeCloner
     NotNull<SeenTypes> types;
     NotNull<SeenTypePacks> packs;
 
+    TypeId forceTy = nullptr;
+    TypePackId forceTp = nullptr;
+
     int steps = 0;
 
 public:
-    TypeCloner(NotNull<TypeArena> arena, NotNull<BuiltinTypes> builtinTypes, NotNull<SeenTypes> types, NotNull<SeenTypePacks> packs)
+    TypeCloner(
+        NotNull<TypeArena> arena,
+        NotNull<BuiltinTypes> builtinTypes,
+        NotNull<SeenTypes> types,
+        NotNull<SeenTypePacks> packs,
+        TypeId forceTy,
+        TypePackId forceTp
+    )
         : arena(arena)
         , builtinTypes(builtinTypes)
         , types(types)
         , packs(packs)
+        , forceTy(forceTy)
+        , forceTp(forceTp)
     {
     }
+
+    virtual ~TypeCloner() = default;
 
     TypeId clone(TypeId ty)
     {
@@ -107,12 +127,13 @@ private:
         }
     }
 
+protected:
     std::optional<TypeId> find(TypeId ty) const
     {
         ty = follow(ty, FollowOption::DisableLazyTypeThunks);
         if (auto it = types->find(ty); it != types->end())
             return it->second;
-        else if (ty->persistent)
+        else if (ty->persistent && ty != forceTy)
             return ty;
         return std::nullopt;
     }
@@ -122,7 +143,7 @@ private:
         tp = follow(tp);
         if (auto it = packs->find(tp); it != packs->end())
             return it->second;
-        else if (tp->persistent)
+        else if (tp->persistent && tp != forceTp)
             return tp;
         return std::nullopt;
     }
@@ -140,15 +161,15 @@ private:
         }
     }
 
-private:
-    TypeId shallowClone(TypeId ty)
+public:
+    virtual TypeId shallowClone(TypeId ty)
     {
         // We want to [`Luau::follow`] but without forcing the expansion of [`LazyType`]s.
         ty = follow(ty, FollowOption::DisableLazyTypeThunks);
 
         if (auto clone = find(ty))
             return *clone;
-        else if (ty->persistent)
+        else if (ty->persistent && ty != forceTy)
             return ty;
 
         TypeId target = arena->addType(ty->ty);
@@ -168,13 +189,13 @@ private:
         return target;
     }
 
-    TypePackId shallowClone(TypePackId tp)
+    virtual TypePackId shallowClone(TypePackId tp)
     {
         tp = follow(tp);
 
         if (auto clone = find(tp))
             return *clone;
-        else if (tp->persistent)
+        else if (tp->persistent && tp != forceTp)
             return tp;
 
         TypePackId target = arena->addTypePack(tp->ty);
@@ -189,9 +210,10 @@ private:
         return target;
     }
 
+private:
     Property shallowClone(const Property& p)
     {
-        if (FFlag::DebugLuauDeferredConstraintResolution)
+        if (FFlag::LuauSolverV2)
         {
             std::optional<TypeId> cloneReadTy;
             if (auto ty = p.readTy)
@@ -227,19 +249,23 @@ private:
     void cloneChildren(TypeId ty)
     {
         return visit(
-            [&](auto&& t) {
+            [&](auto&& t)
+            {
                 return cloneChildren(&t);
             },
-            asMutable(ty)->ty);
+            asMutable(ty)->ty
+        );
     }
 
     void cloneChildren(TypePackId tp)
     {
         return visit(
-            [&](auto&& t) {
+            [&](auto&& t)
+            {
                 return cloneChildren(&t);
             },
-            asMutable(tp)->ty);
+            asMutable(tp)->ty
+        );
     }
 
     void cloneChildren(Kind kind)
@@ -252,8 +278,7 @@ private:
             LUAU_ASSERT(!"Item holds neither TypeId nor TypePackId when enqueuing its children?");
     }
 
-    // ErrorType and ErrorTypePack is an alias to this type.
-    void cloneChildren(Unifiable::Error* t)
+    void cloneChildren(ErrorType* t)
     {
         // noop.
     }
@@ -355,6 +380,11 @@ private:
         // noop.
     }
 
+    void cloneChildren(NoRefineType* t)
+    {
+        // noop.
+    }
+
     void cloneChildren(UnionType* t)
     {
         for (TypeId& ty : t->options)
@@ -367,7 +397,7 @@ private:
             ty = shallowClone(ty);
     }
 
-    void cloneChildren(LazyType* t)
+    virtual void cloneChildren(LazyType* t)
     {
         if (auto unwrapped = t->unwrapped.load())
             t->unwrapped.store(shallowClone(unwrapped));
@@ -418,6 +448,11 @@ private:
         t->boundTo = shallowClone(t->boundTo);
     }
 
+    void cloneChildren(ErrorTypePack* t)
+    {
+        // noop.
+    }
+
     void cloneChildren(VariadicTypePack* t)
     {
         t->ty = shallowClone(t->ty);
@@ -442,14 +477,136 @@ private:
     }
 };
 
+class FragmentAutocompleteTypeCloner final : public TypeCloner
+{
+    Scope* replacementForNullScope = nullptr;
+
+public:
+    FragmentAutocompleteTypeCloner(
+        NotNull<TypeArena> arena,
+        NotNull<BuiltinTypes> builtinTypes,
+        NotNull<SeenTypes> types,
+        NotNull<SeenTypePacks> packs,
+        TypeId forceTy,
+        TypePackId forceTp,
+        Scope* replacementForNullScope
+    )
+        : TypeCloner(arena, builtinTypes, types, packs, forceTy, forceTp)
+        , replacementForNullScope(replacementForNullScope)
+    {
+        LUAU_ASSERT(replacementForNullScope);
+    }
+
+    TypeId shallowClone(TypeId ty) override
+    {
+        // We want to [`Luau::follow`] but without forcing the expansion of [`LazyType`]s.
+        ty = follow(ty, FollowOption::DisableLazyTypeThunks);
+
+        if (auto clone = find(ty))
+            return *clone;
+        else if (ty->persistent && ty != forceTy)
+            return ty;
+
+        TypeId target = arena->addType(ty->ty);
+        asMutable(target)->documentationSymbol = ty->documentationSymbol;
+
+        if (auto generic = getMutable<GenericType>(target))
+            generic->scope = nullptr;
+        else if (auto free = getMutable<FreeType>(target))
+        {
+            free->scope = replacementForNullScope;
+        }
+        else if (auto tt = getMutable<TableType>(target))
+        {
+            if (FFlag::LuauClonedTableAndFunctionTypesMustHaveScopes)
+                tt->scope = replacementForNullScope;
+        }
+        else if (auto fn = getMutable<FunctionType>(target))
+        {
+            if (FFlag::LuauClonedTableAndFunctionTypesMustHaveScopes)
+                fn->scope = replacementForNullScope;
+        }
+
+        (*types)[ty] = target;
+        queue.emplace_back(target);
+        return target;
+    }
+
+    TypePackId shallowClone(TypePackId tp) override
+    {
+        tp = follow(tp);
+
+        if (auto clone = find(tp))
+            return *clone;
+        else if (tp->persistent && tp != forceTp)
+            return tp;
+
+        TypePackId target = arena->addTypePack(tp->ty);
+
+        if (auto generic = getMutable<GenericTypePack>(target))
+            generic->scope = nullptr;
+        else if (auto free = getMutable<FreeTypePack>(target))
+            free->scope = replacementForNullScope;
+
+        (*packs)[tp] = target;
+        queue.emplace_back(target);
+        return target;
+    }
+
+    void cloneChildren(LazyType* t) override
+    {
+        // Do not clone lazy types
+        if (!FFlag::LuauIncrementalAutocompleteDemandBasedCloning)
+        {
+            if (auto unwrapped = t->unwrapped.load())
+                t->unwrapped.store(shallowClone(unwrapped));
+        }
+    }
+};
+
+
 } // namespace
+
+TypePackId shallowClone(TypePackId tp, TypeArena& dest, CloneState& cloneState, bool ignorePersistent)
+{
+    if (tp->persistent && !ignorePersistent)
+        return tp;
+
+    TypeCloner cloner{
+        NotNull{&dest},
+        cloneState.builtinTypes,
+        NotNull{&cloneState.seenTypes},
+        NotNull{&cloneState.seenTypePacks},
+        nullptr,
+        ignorePersistent ? tp : nullptr
+    };
+
+    return cloner.shallowClone(tp);
+}
+
+TypeId shallowClone(TypeId typeId, TypeArena& dest, CloneState& cloneState, bool ignorePersistent)
+{
+    if (typeId->persistent && !ignorePersistent)
+        return typeId;
+
+    TypeCloner cloner{
+        NotNull{&dest},
+        cloneState.builtinTypes,
+        NotNull{&cloneState.seenTypes},
+        NotNull{&cloneState.seenTypePacks},
+        ignorePersistent ? typeId : nullptr,
+        nullptr
+    };
+
+    return cloner.shallowClone(typeId);
+}
 
 TypePackId clone(TypePackId tp, TypeArena& dest, CloneState& cloneState)
 {
     if (tp->persistent)
         return tp;
 
-    TypeCloner cloner{NotNull{&dest}, cloneState.builtinTypes, NotNull{&cloneState.seenTypes}, NotNull{&cloneState.seenTypePacks}};
+    TypeCloner cloner{NotNull{&dest}, cloneState.builtinTypes, NotNull{&cloneState.seenTypes}, NotNull{&cloneState.seenTypePacks}, nullptr, nullptr};
     return cloner.clone(tp);
 }
 
@@ -458,13 +615,13 @@ TypeId clone(TypeId typeId, TypeArena& dest, CloneState& cloneState)
     if (typeId->persistent)
         return typeId;
 
-    TypeCloner cloner{NotNull{&dest}, cloneState.builtinTypes, NotNull{&cloneState.seenTypes}, NotNull{&cloneState.seenTypePacks}};
+    TypeCloner cloner{NotNull{&dest}, cloneState.builtinTypes, NotNull{&cloneState.seenTypes}, NotNull{&cloneState.seenTypePacks}, nullptr, nullptr};
     return cloner.clone(typeId);
 }
 
 TypeFun clone(const TypeFun& typeFun, TypeArena& dest, CloneState& cloneState)
 {
-    TypeCloner cloner{NotNull{&dest}, cloneState.builtinTypes, NotNull{&cloneState.seenTypes}, NotNull{&cloneState.seenTypePacks}};
+    TypeCloner cloner{NotNull{&dest}, cloneState.builtinTypes, NotNull{&cloneState.seenTypes}, NotNull{&cloneState.seenTypePacks}, nullptr, nullptr};
 
     TypeFun copy = typeFun;
 
@@ -488,5 +645,111 @@ TypeFun clone(const TypeFun& typeFun, TypeArena& dest, CloneState& cloneState)
 
     return copy;
 }
+
+Binding clone(const Binding& binding, TypeArena& dest, CloneState& cloneState)
+{
+    TypeCloner cloner{NotNull{&dest}, cloneState.builtinTypes, NotNull{&cloneState.seenTypes}, NotNull{&cloneState.seenTypePacks}, nullptr, nullptr};
+
+    Binding b;
+    b.deprecated = binding.deprecated;
+    b.deprecatedSuggestion = binding.deprecatedSuggestion;
+    b.documentationSymbol = binding.documentationSymbol;
+    b.location = binding.location;
+    b.typeId = cloner.clone(binding.typeId);
+
+    return b;
+}
+
+TypePackId cloneIncremental(TypePackId tp, TypeArena& dest, CloneState& cloneState, Scope* freshScopeForFreeTypes)
+{
+    if (tp->persistent)
+        return tp;
+
+    FragmentAutocompleteTypeCloner cloner{
+        NotNull{&dest},
+        cloneState.builtinTypes,
+        NotNull{&cloneState.seenTypes},
+        NotNull{&cloneState.seenTypePacks},
+        nullptr,
+        nullptr,
+        freshScopeForFreeTypes
+    };
+    return cloner.clone(tp);
+}
+
+TypeId cloneIncremental(TypeId typeId, TypeArena& dest, CloneState& cloneState, Scope* freshScopeForFreeTypes)
+{
+    if (typeId->persistent)
+        return typeId;
+
+    FragmentAutocompleteTypeCloner cloner{
+        NotNull{&dest},
+        cloneState.builtinTypes,
+        NotNull{&cloneState.seenTypes},
+        NotNull{&cloneState.seenTypePacks},
+        nullptr,
+        nullptr,
+        freshScopeForFreeTypes
+    };
+    return cloner.clone(typeId);
+}
+
+TypeFun cloneIncremental(const TypeFun& typeFun, TypeArena& dest, CloneState& cloneState, Scope* freshScopeForFreeTypes)
+{
+    FragmentAutocompleteTypeCloner cloner{
+        NotNull{&dest},
+        cloneState.builtinTypes,
+        NotNull{&cloneState.seenTypes},
+        NotNull{&cloneState.seenTypePacks},
+        nullptr,
+        nullptr,
+        freshScopeForFreeTypes
+    };
+
+    TypeFun copy = typeFun;
+
+    for (auto& param : copy.typeParams)
+    {
+        param.ty = cloner.clone(param.ty);
+
+        if (param.defaultValue)
+            param.defaultValue = cloner.clone(*param.defaultValue);
+    }
+
+    for (auto& param : copy.typePackParams)
+    {
+        param.tp = cloner.clone(param.tp);
+
+        if (param.defaultValue)
+            param.defaultValue = cloner.clone(*param.defaultValue);
+    }
+
+    copy.type = cloner.clone(copy.type);
+
+    return copy;
+}
+
+Binding cloneIncremental(const Binding& binding, TypeArena& dest, CloneState& cloneState, Scope* freshScopeForFreeTypes)
+{
+    FragmentAutocompleteTypeCloner cloner{
+        NotNull{&dest},
+        cloneState.builtinTypes,
+        NotNull{&cloneState.seenTypes},
+        NotNull{&cloneState.seenTypePacks},
+        nullptr,
+        nullptr,
+        freshScopeForFreeTypes
+    };
+
+    Binding b;
+    b.deprecated = binding.deprecated;
+    b.deprecatedSuggestion = binding.deprecatedSuggestion;
+    b.documentationSymbol = binding.documentationSymbol;
+    b.location = binding.location;
+    b.typeId = FFlag::LuauDoNotClonePersistentBindings && binding.typeId->persistent ? binding.typeId : cloner.clone(binding.typeId);
+
+    return b;
+}
+
 
 } // namespace Luau

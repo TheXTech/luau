@@ -72,7 +72,7 @@ private:
     size_t originalThreshold = 0;
 };
 
-void luaV_getimport(lua_State* L, Table* env, TValue* k, StkId res, uint32_t id, bool propagatenil)
+void luaV_getimport(lua_State* L, LuaTable* env, TValue* k, StkId res, uint32_t id, bool propagatenil)
 {
     int count = id >> 30;
     LUAU_ASSERT(count > 0);
@@ -141,7 +141,7 @@ static TString* readString(TempBuffer<TString*>& strings, const char* data, size
     return id == 0 ? NULL : strings[id - 1];
 }
 
-static void resolveImportSafe(lua_State* L, Table* env, TValue* k, uint32_t id)
+static void resolveImportSafe(lua_State* L, LuaTable* env, TValue* k, uint32_t id)
 {
     struct ResolveImport
     {
@@ -273,7 +273,7 @@ int luau_load(lua_State* L, const char* chunkname, const char* data, size_t size
     const ScopedSetGCThreshold pauseGC{L->global, SIZE_MAX};
 
     // env is 0 for current environment and a stack index otherwise
-    Table* envt = (env == 0) ? L->gt : hvalue(luaA_toobject(L, env));
+    LuaTable* envt = (env == 0) ? L->gt : hvalue(luaA_toobject(L, env));
 
     TString* source = luaS_new(L, chunkname);
 
@@ -287,8 +287,9 @@ int luau_load(lua_State* L, const char* chunkname, const char* data, size_t size
         {
             char chunkbuf[LUA_IDSIZE];
             const char* chunkid = luaO_chunkid(chunkbuf, sizeof(chunkbuf), chunkname, strlen(chunkname));
-            lua_pushfstring(L, "%s: bytecode type version mismatch (expected [%d..%d], got %d)", chunkid, LBC_TYPE_VERSION_MIN, LBC_TYPE_VERSION_MAX,
-                typesversion);
+            lua_pushfstring(
+                L, "%s: bytecode type version mismatch (expected [%d..%d], got %d)", chunkid, LBC_TYPE_VERSION_MIN, LBC_TYPE_VERSION_MAX, typesversion
+            );
             return 1;
         }
     }
@@ -480,7 +481,7 @@ int luau_load(lua_State* L, const char* chunkname, const char* data, size_t size
             case LBC_CONSTANT_TABLE:
             {
                 int keys = readVarInt(data, size, offset);
-                Table* h = luaH_new(L, 0, keys);
+                LuaTable* h = luaH_new(L, 0, keys);
                 for (int i = 0; i < keys; ++i)
                 {
                     int key = readVarInt(data, size, offset);

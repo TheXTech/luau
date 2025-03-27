@@ -52,8 +52,13 @@ struct Unifier2
     DenseHashSet<const void*>* uninhabitedTypeFunctions;
 
     Unifier2(NotNull<TypeArena> arena, NotNull<BuiltinTypes> builtinTypes, NotNull<Scope> scope, NotNull<InternalErrorReporter> ice);
-    Unifier2(NotNull<TypeArena> arena, NotNull<BuiltinTypes> builtinTypes, NotNull<Scope> scope, NotNull<InternalErrorReporter> ice,
-        DenseHashSet<const void*>* uninhabitedTypeFunctions);
+    Unifier2(
+        NotNull<TypeArena> arena,
+        NotNull<BuiltinTypes> builtinTypes,
+        NotNull<Scope> scope,
+        NotNull<InternalErrorReporter> ice,
+        DenseHashSet<const void*>* uninhabitedTypeFunctions
+    );
 
     /** Attempt to commit the subtype relation subTy <: superTy to the type
      * graph.
@@ -81,6 +86,9 @@ struct Unifier2
     bool unify(const FunctionType* subFn, const AnyType* superAny);
     bool unify(const AnyType* subAny, const TableType* superTable);
     bool unify(const TableType* subTable, const AnyType* superAny);
+
+    bool unify(const MetatableType* subMetatable, const AnyType*);
+    bool unify(const AnyType*, const MetatableType* superMetatable);
 
     // TODO think about this one carefully.  We don't do unions or intersections of type packs
     bool unify(TypePackId subTp, TypePackId superTp);

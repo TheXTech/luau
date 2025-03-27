@@ -6,8 +6,6 @@
 #include "doctest.h"
 #include "Fixture.h"
 
-LUAU_FASTFLAG(LuauFixBindingForGlobalPos);
-
 using namespace Luau;
 
 struct DocumentationSymbolFixture : BuiltinsFixture
@@ -27,20 +25,24 @@ TEST_SUITE_BEGIN("AstQuery::getDocumentationSymbolAtPosition");
 
 TEST_CASE_FIXTURE(DocumentationSymbolFixture, "binding")
 {
-    std::optional<DocumentationSymbol> global = getDocSymbol(R"(
+    std::optional<DocumentationSymbol> global = getDocSymbol(
+        R"(
         local a = string.sub()
     )",
-        Position(1, 21));
+        Position(1, 21)
+    );
 
     CHECK_EQ(global, "@luau/global/string");
 }
 
 TEST_CASE_FIXTURE(DocumentationSymbolFixture, "prop")
 {
-    std::optional<DocumentationSymbol> substring = getDocSymbol(R"(
+    std::optional<DocumentationSymbol> substring = getDocSymbol(
+        R"(
         local a = string.sub()
     )",
-        Position(1, 27));
+        Position(1, 27)
+    );
 
     CHECK_EQ(substring, "@luau/global/string.sub");
 }
@@ -51,11 +53,13 @@ TEST_CASE_FIXTURE(DocumentationSymbolFixture, "event_callback_arg")
         declare function Connect(fn: (string) -> ())
     )");
 
-    std::optional<DocumentationSymbol> substring = getDocSymbol(R"(
+    std::optional<DocumentationSymbol> substring = getDocSymbol(
+        R"(
         Connect(function(abc)
         end)
     )",
-        Position(1, 27));
+        Position(1, 27)
+    );
 
     CHECK_EQ(substring, "@test/global/Connect/param/0/param/0");
 }
@@ -66,10 +70,12 @@ TEST_CASE_FIXTURE(DocumentationSymbolFixture, "overloaded_fn")
         declare foo: ((string) -> number) & ((number) -> string)
     )");
 
-    std::optional<DocumentationSymbol> symbol = getDocSymbol(R"(
+    std::optional<DocumentationSymbol> symbol = getDocSymbol(
+        R"(
         foo("asdf")
     )",
-        Position(1, 10));
+        Position(1, 10)
+    );
 
     CHECK_EQ(symbol, "@test/global/foo/overload/(string) -> number");
 }
@@ -86,11 +92,13 @@ TEST_CASE_FIXTURE(DocumentationSymbolFixture, "class_method")
         }
     )");
 
-    std::optional<DocumentationSymbol> symbol = getDocSymbol(R"(
+    std::optional<DocumentationSymbol> symbol = getDocSymbol(
+        R"(
         local x: Foo = Foo.new()
         x:bar("asdf")
     )",
-        Position(2, 11));
+        Position(2, 11)
+    );
 
     CHECK_EQ(symbol, "@test/globaltype/Foo.bar");
 }
@@ -108,11 +116,13 @@ TEST_CASE_FIXTURE(DocumentationSymbolFixture, "overloaded_class_method")
         }
     )");
 
-    std::optional<DocumentationSymbol> symbol = getDocSymbol(R"(
+    std::optional<DocumentationSymbol> symbol = getDocSymbol(
+        R"(
         local x: Foo = Foo.new()
         x:bar("asdf")
     )",
-        Position(2, 11));
+        Position(2, 11)
+    );
 
     CHECK_EQ(symbol, "@test/globaltype/Foo.bar/overload/(Foo, string) -> number");
 }
@@ -125,10 +135,12 @@ TEST_CASE_FIXTURE(DocumentationSymbolFixture, "table_function_prop")
         }
     )");
 
-    std::optional<DocumentationSymbol> symbol = getDocSymbol(R"(
+    std::optional<DocumentationSymbol> symbol = getDocSymbol(
+        R"(
         Foo.new("asdf")
     )",
-        Position(1, 13));
+        Position(1, 13)
+    );
 
     CHECK_EQ(symbol, "@test/global/Foo.new");
 }
@@ -141,12 +153,50 @@ TEST_CASE_FIXTURE(DocumentationSymbolFixture, "table_overloaded_function_prop")
         }
     )");
 
-    std::optional<DocumentationSymbol> symbol = getDocSymbol(R"(
+    std::optional<DocumentationSymbol> symbol = getDocSymbol(
+        R"(
         Foo.new("asdf")
     )",
-        Position(1, 13));
+        Position(1, 13)
+    );
 
     CHECK_EQ(symbol, "@test/global/Foo.new/overload/(string) -> number");
+}
+
+TEST_CASE_FIXTURE(DocumentationSymbolFixture, "string_metatable_method")
+{
+    std::optional<DocumentationSymbol> symbol = getDocSymbol(
+        R"(
+        local x: string = "Foo"
+        x:rep(2)
+    )",
+        Position(2, 12)
+    );
+
+    CHECK_EQ(symbol, "@luau/global/string.rep");
+}
+
+TEST_CASE_FIXTURE(DocumentationSymbolFixture, "parent_class_method")
+{
+    loadDefinition(R"(
+        declare class Foo
+            function bar(self, x: string): number
+        end
+
+        declare class Bar extends Foo
+            function notbar(self, x: string): number
+        end
+    )");
+
+    std::optional<DocumentationSymbol> symbol = getDocSymbol(
+        R"(
+        local x: Bar = Bar.new()
+        x:bar("asdf")
+    )",
+        Position(2, 11)
+    );
+
+    CHECK_EQ(symbol, "@test/globaltype/Foo.bar");
 }
 
 TEST_SUITE_END();
@@ -155,6 +205,8 @@ TEST_SUITE_BEGIN("AstQuery");
 
 TEST_CASE_FIXTURE(Fixture, "last_argument_function_call_type")
 {
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
     check(R"(
 local function foo() return 2 end
 local function bar(a: number) return -a end
@@ -335,7 +387,7 @@ TEST_CASE_FIXTURE(Fixture, "find_expr_ancestry")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "find_binding_at_position_global_start_of_file")
 {
-    ScopedFastFlag sff{FFlag::LuauFixBindingForGlobalPos, true};
+
     check("local x = string.char(1)");
     const Position pos(0, 12);
 
@@ -343,6 +395,36 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "find_binding_at_position_global_start_of_fil
 
     REQUIRE(binding);
     CHECK_EQ(binding->location, Location{Position{0, 0}, Position{0, 0}});
+}
+
+TEST_CASE_FIXTURE(Fixture, "interior_binding_location_is_consistent_with_exterior_binding")
+{
+    CheckResult result = check(R"(
+        local function abcd(arg)
+            abcd(arg)
+        end
+
+        abcd(0)
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+
+    // FIXME CLI-114385: findBindingByPosition does not properly handle AstStatLocalFunction.
+
+    // std::optional<Binding> declBinding = findBindingAtPosition(*getMainModule(), *getMainSourceModule(), {1, 26});
+    // REQUIRE(declBinding);
+
+    // CHECK(declBinding->location == Location{{1, 25}, {1, 28}});
+
+    std::optional<Binding> innerCallBinding = findBindingAtPosition(*getMainModule(), *getMainSourceModule(), {2, 15});
+    REQUIRE(innerCallBinding);
+
+    CHECK(innerCallBinding->location == Location{{1, 23}, {1, 27}});
+
+    std::optional<Binding> outerCallBinding = findBindingAtPosition(*getMainModule(), *getMainSourceModule(), {5, 8});
+    REQUIRE(outerCallBinding);
+
+    CHECK(outerCallBinding->location == Location{{1, 23}, {1, 27}});
 }
 
 TEST_SUITE_END();

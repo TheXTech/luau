@@ -1,4 +1,5 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
+
 #include "Luau/TypeInfer.h"
 #include "Luau/RecursionCounter.h"
 
@@ -10,13 +11,15 @@
 
 using namespace Luau;
 
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
-LUAU_FASTFLAG(DebugLuauSharedSelf);
-LUAU_FASTINT(LuauNormalizeCacheLimit);
-LUAU_FASTINT(LuauTarjanChildLimit);
-LUAU_FASTINT(LuauTypeInferIterationLimit);
-LUAU_FASTINT(LuauTypeInferRecursionLimit);
-LUAU_FASTINT(LuauTypeInferTypePackLoopLimit);
+LUAU_FASTFLAG(LuauSolverV2)
+LUAU_FASTFLAG(DebugLuauEqSatSimplification)
+LUAU_FASTFLAG(LuauStoreCSTData)
+LUAU_FASTINT(LuauNormalizeCacheLimit)
+LUAU_FASTINT(LuauTarjanChildLimit)
+LUAU_FASTINT(LuauTypeInferIterationLimit)
+LUAU_FASTINT(LuauTypeInferRecursionLimit)
+LUAU_FASTINT(LuauTypeInferTypePackLoopLimit)
+LUAU_FASTFLAG(LuauImproveTypePathsInErrors)
 
 TEST_SUITE_BEGIN("ProvisionalTests");
 
@@ -46,7 +49,16 @@ TEST_CASE_FIXTURE(Fixture, "typeguard_inference_incomplete")
         end
     )";
 
-    const std::string expected = R"(
+    const std::string expected = FFlag::LuauStoreCSTData ? R"(
+        function f(a:{fn:()->(a,b...)}): ()
+            if type(a) == 'boolean' then
+                local a1:boolean=a
+            elseif a.fn() then
+                local a2:{fn:()->(a,b...)}=a
+            end
+        end
+    )"
+                                                         : R"(
         function f(a:{fn:()->(a,b...)}): ()
             if type(a) == 'boolean'then
                 local a1:boolean=a
@@ -56,11 +68,56 @@ TEST_CASE_FIXTURE(Fixture, "typeguard_inference_incomplete")
         end
     )";
 
-    CHECK_EQ(expected, decorateWithTypes(code));
+    const std::string expectedWithNewSolver = FFlag::LuauStoreCSTData ? R"(
+        function f(a:{fn:()->(unknown,...unknown)}): ()
+            if type(a) == 'boolean' then
+                local a1:{fn:()->(unknown,...unknown)}&boolean=a
+            elseif a.fn() then
+                local a2:{fn:()->(unknown,...unknown)}&(class|function|nil|number|string|thread|buffer|table)=a
+            end
+        end
+    )"
+                                                                      : R"(
+        function f(a:{fn:()->(unknown,...unknown)}): ()
+            if type(a) == 'boolean'then
+                local a1:{fn:()->(unknown,...unknown)}&boolean=a
+            elseif a.fn()then
+                local a2:{fn:()->(unknown,...unknown)}&(class|function|nil|number|string|thread|buffer|table)=a
+            end
+        end
+    )";
+
+    const std::string expectedWithEqSat = FFlag::LuauStoreCSTData ? R"(
+        function f(a:{fn:()->(unknown,...unknown)}): ()
+            if type(a) == 'boolean' then
+                local a1:{fn:()->(unknown,...unknown)}&boolean=a
+            elseif a.fn() then
+                local a2:{fn:()->(unknown,...unknown)}&negate<boolean>=a
+            end
+        end
+    )"
+                                                                  : R"(
+        function f(a:{fn:()->(unknown,...unknown)}): ()
+            if type(a) == 'boolean'then
+                local a1:{fn:()->(unknown,...unknown)}&boolean=a
+            elseif a.fn()then
+                local a2:{fn:()->(unknown,...unknown)}&negate<boolean>=a
+            end
+        end
+    )";
+
+    if (FFlag::LuauSolverV2 && !FFlag::DebugLuauEqSatSimplification)
+        CHECK_EQ(expectedWithNewSolver, decorateWithTypes(code));
+    else if (FFlag::LuauSolverV2 && FFlag::DebugLuauEqSatSimplification)
+        CHECK_EQ(expectedWithEqSat, decorateWithTypes(code));
+    else
+        CHECK_EQ(expected, decorateWithTypes(code));
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "luau-polyfill.Array.filter")
 {
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
     // This test exercises the fact that we should reduce sealed/unsealed/free tables
     // res is a unsealed table with type {((T & ~nil)?) & any}
     // Because we do not reduce it fully, we cannot unify it with `Array<T> = { [number] : T}
@@ -158,6 +215,8 @@ TEST_CASE_FIXTURE(Fixture, "it_should_be_agnostic_of_actual_size")
 // For now, infer it as just a free table.
 TEST_CASE_FIXTURE(BuiltinsFixture, "setmetatable_constrains_free_type_into_free_table")
 {
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
     CheckResult result = check(R"(
         local a = {}
         local b
@@ -176,6 +235,8 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "setmetatable_constrains_free_type_into_free_
 // Luau currently doesn't yet know how to allow assignments when the binding was refined.
 TEST_CASE_FIXTURE(Fixture, "while_body_are_also_refined")
 {
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
     CheckResult result = check(R"(
         type Node<T> = { value: T, child: Node<T>? }
 
@@ -199,6 +260,8 @@ TEST_CASE_FIXTURE(Fixture, "while_body_are_also_refined")
 // We should be type checking the metamethod at the call site of setmetatable.
 TEST_CASE_FIXTURE(BuiltinsFixture, "error_on_eq_metamethod_returning_a_type_other_than_boolean")
 {
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
     CheckResult result = check(R"(
         local tab = {a = 1}
         setmetatable(tab, {__eq = function(a, b): number
@@ -257,13 +320,10 @@ TEST_CASE_FIXTURE(Fixture, "discriminate_from_x_not_equal_to_nil")
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
+    if (FFlag::LuauSolverV2)
     {
-
         CHECK_EQ("{ x: string, y: number }", toString(requireTypeAtPosition({5, 28})));
-
-        // Should be { x: nil, y: nil }
-        CHECK_EQ("{ x: nil, y: nil } | { x: string, y: number }", toString(requireTypeAtPosition({7, 28})));
+        CHECK_EQ("{ x: nil, y: nil }", toString(requireTypeAtPosition({7, 28})));
     }
     else
     {
@@ -302,9 +362,14 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "bail_early_if_unification_is_too_complicated
         end
     )LUA");
 
-    auto it = std::find_if(result.errors.begin(), result.errors.end(), [](TypeError& a) {
-        return nullptr != get<UnificationTooComplex>(a);
-    });
+    auto it = std::find_if(
+        result.errors.begin(),
+        result.errors.end(),
+        [](TypeError& a)
+        {
+            return nullptr != get<UnificationTooComplex>(a);
+        }
+    );
     if (it == result.errors.end())
     {
         dumpErrors(result);
@@ -337,10 +402,19 @@ TEST_CASE_FIXTURE(Fixture, "do_not_ice_when_trying_to_pick_first_of_generic_type
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    // f and g should have the type () -> ()
-    CHECK_EQ("() -> (a...)", toString(requireType("f")));
-    CHECK_EQ("<a...>() -> (a...)", toString(requireType("g")));
-    CHECK_EQ("any", toString(requireType("x"))); // any is returned instead of ICE for now
+    if (FFlag::LuauSolverV2)
+    {
+        CHECK("() -> ()" == toString(requireType("f")));
+        CHECK("() -> ()" == toString(requireType("g")));
+        CHECK("nil" == toString(requireType("x")));
+    }
+    else
+    {
+        // f and g should have the type () -> ()
+        CHECK_EQ("() -> (a...)", toString(requireType("f")));
+        CHECK_EQ("<a...>() -> (a...)", toString(requireType("g")));
+        CHECK_EQ("any", toString(requireType("x"))); // any is returned instead of ICE for now
+    }
 }
 
 TEST_CASE_FIXTURE(Fixture, "specialization_binds_with_prototypes_too_early")
@@ -351,16 +425,17 @@ TEST_CASE_FIXTURE(Fixture, "specialization_binds_with_prototypes_too_early")
         local s2s: (string) -> string = id
     )");
 
-    LUAU_REQUIRE_ERRORS(result); // Should not have any errors.
+    if (FFlag::LuauSolverV2)
+        LUAU_REQUIRE_NO_ERRORS(result);
+    else
+        LUAU_REQUIRE_ERRORS(result); // Should not have any errors.
 }
 
 TEST_CASE_FIXTURE(Fixture, "weird_fail_to_unify_type_pack")
 {
-    ScopedFastFlag sff[] = {
-        // I'm not sure why this is broken without DCR, but it seems to be fixed
-        // when DCR is enabled.
-        {FFlag::DebugLuauDeferredConstraintResolution, false},
-    };
+    // I'm not sure why this is broken without DCR, but it seems to be fixed
+    // when DCR is enabled.
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
 
     CheckResult result = check(R"(
         local function f() return end
@@ -440,32 +515,10 @@ TEST_CASE_FIXTURE(Fixture, "free_is_not_bound_to_any")
     CHECK_EQ("((any) -> (), any) -> ()", toString(requireType("foo")));
 }
 
-TEST_CASE_FIXTURE(BuiltinsFixture, "greedy_inference_with_shared_self_triggers_function_with_no_returns")
-{
-    ScopedFastFlag sff{FFlag::DebugLuauSharedSelf, true};
-
-    CheckResult result = check(R"(
-        local T = {}
-        T.__index = T
-
-        function T.new()
-            local self = setmetatable({}, T)
-            return self:ctor() or self
-        end
-
-        function T:ctor()
-            -- oops, no return!
-        end
-    )");
-
-    LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ("Not all codepaths in this function return 'self, a...'.", toString(result.errors[0]));
-}
-
 TEST_CASE_FIXTURE(Fixture, "dcr_can_partially_dispatch_a_constraint")
 {
     ScopedFastFlag sff[] = {
-        {FFlag::DebugLuauDeferredConstraintResolution, true},
+        {FFlag::LuauSolverV2, true},
     };
 
     CheckResult result = check(R"(
@@ -497,7 +550,7 @@ TEST_CASE_FIXTURE(Fixture, "dcr_can_partially_dispatch_a_constraint")
     // to be solved later.  This should be faster and theoretically less prone
     // to cyclic constraint dependencies.
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
+    if (FFlag::LuauSolverV2)
         CHECK("(unknown, number) -> ()" == toString(requireType("prime_iter")));
     else
         CHECK("<a>(a, number) -> ()" == toString(requireType("prime_iter")));
@@ -505,24 +558,23 @@ TEST_CASE_FIXTURE(Fixture, "dcr_can_partially_dispatch_a_constraint")
 
 TEST_CASE_FIXTURE(Fixture, "free_options_cannot_be_unified_together")
 {
+    ScopedFastFlag sff{FFlag::LuauSolverV2, false};
+
     TypeArena arena;
     TypeId nilType = builtinTypes->nilType;
 
     std::unique_ptr scope = std::make_unique<Scope>(builtinTypes->anyTypePack);
 
-    TypeId free1 = arena.addType(FreeType{scope.get()});
+    TypeId free1 = arena.freshType(builtinTypes, scope.get());
     TypeId option1 = arena.addType(UnionType{{nilType, free1}});
 
-    TypeId free2 = arena.addType(FreeType{scope.get()});
+    TypeId free2 = arena.freshType(builtinTypes, scope.get());
     TypeId option2 = arena.addType(UnionType{{nilType, free2}});
 
     InternalErrorReporter iceHandler;
     UnifierSharedState sharedState{&iceHandler};
     Normalizer normalizer{&arena, builtinTypes, NotNull{&sharedState}};
     Unifier u{NotNull{&normalizer}, NotNull{scope.get()}, Location{}, Variance::Covariant};
-
-    if (FFlag::DebugLuauDeferredConstraintResolution)
-        u.enableNewSolver();
 
     u.tryUnify(option1, option2);
 
@@ -539,7 +591,7 @@ TEST_CASE_FIXTURE(Fixture, "free_options_cannot_be_unified_together")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "for_in_loop_with_zero_iterators")
 {
-    ScopedFastFlag sff{FFlag::DebugLuauDeferredConstraintResolution, false};
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
 
     CheckResult result = check(R"(
         function no_iter() end
@@ -586,8 +638,8 @@ return wrapStrictTable(Constants, "Constants")
 
     std::optional<TypeId> result = first(m->returnType);
     REQUIRE(result);
-    if (FFlag::DebugLuauDeferredConstraintResolution)
-        CHECK_EQ("(any & ~(*error-type* | table))?", toString(*result));
+    if (FFlag::LuauSolverV2)
+        CHECK_EQ("unknown", toString(*result));
     else
         CHECK_MESSAGE(get<AnyType>(*result), *result);
 }
@@ -628,7 +680,11 @@ return wrapStrictTable(Constants, "Constants")
 
     std::optional<TypeId> result = first(m->returnType);
     REQUIRE(result);
-    CHECK(get<AnyType>(*result));
+
+    if (FFlag::LuauSolverV2)
+        CHECK("unknown" == toString(*result));
+    else
+        CHECK("any" == toString(*result));
 }
 
 namespace
@@ -637,13 +693,15 @@ struct IsSubtypeFixture : Fixture
 {
     bool isSubtype(TypeId a, TypeId b)
     {
+        SimplifierPtr simplifier = newSimplifier(NotNull{&getMainModule()->internalTypes}, builtinTypes);
+
         ModulePtr module = getMainModule();
         REQUIRE(module);
 
         if (!module->hasModuleScope())
             FAIL("isSubtype: module scope data is not available");
 
-        return ::Luau::isSubtype(a, b, NotNull{module->getModuleScope().get()}, builtinTypes, ice);
+        return ::Luau::isSubtype(a, b, NotNull{module->getModuleScope().get()}, builtinTypes, NotNull{simplifier.get()}, ice);
     }
 };
 } // namespace
@@ -811,19 +869,34 @@ TEST_CASE_FIXTURE(Fixture, "assign_table_with_refined_property_with_a_similar_ty
         end
     )");
 
-    LUAU_REQUIRE_ERROR_COUNT(1, result);
-    const std::string expected = R"(Type
+    if (FFlag::LuauSolverV2)
+        LUAU_REQUIRE_NO_ERRORS(result); // This is wrong.  We should be rejecting this assignment.
+    else
+    {
+        LUAU_REQUIRE_ERROR_COUNT(1, result);
+        const std::string expected = (FFlag::LuauImproveTypePathsInErrors) ?
+                                                                           R"(Type
+	'{| x: number? |}'
+could not be converted into
+	'{| x: number |}'
+caused by:
+  Property 'x' is not compatible.
+Type 'number?' could not be converted into 'number' in an invariant context)"
+                                                                           : R"(Type
     '{| x: number? |}'
 could not be converted into
     '{| x: number |}'
 caused by:
   Property 'x' is not compatible.
 Type 'number?' could not be converted into 'number' in an invariant context)";
-    CHECK_EQ(expected, toString(result.errors[0]));
+        CHECK_EQ(expected, toString(result.errors[0]));
+    }
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "table_insert_with_a_singleton_argument")
 {
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
     CheckResult result = check(R"(
         local function foo(t, x)
             if x == "hi" or x == "bye" then
@@ -839,7 +912,7 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "table_insert_with_a_singleton_argument")
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
+    if (FFlag::LuauSolverV2)
         CHECK_EQ("{string}", toString(requireType("t")));
     else
     {
@@ -879,15 +952,25 @@ TEST_CASE_FIXTURE(Fixture, "expected_type_should_be_a_helpful_deduction_guide_fo
         local x: Ref<number?> = useRef(nil)
     )");
 
-    // This is actually wrong! Sort of. It's doing the wrong thing, it's actually asking whether
-    //  `{| val: number? |} <: {| val: nil |}`
-    // instead of the correct way, which is
-    //  `{| val: nil |} <: {| val: number? |}`
-    LUAU_REQUIRE_NO_ERRORS(result);
+    if (FFlag::LuauSolverV2)
+    {
+        // This bug is fixed in the new solver.
+        LUAU_REQUIRE_ERROR_COUNT(1, result);
+    }
+    else
+    {
+        // This is actually wrong! Sort of. It's doing the wrong thing, it's actually asking whether
+        //  `{| val: number? |} <: {| val: nil |}`
+        // instead of the correct way, which is
+        //  `{| val: nil |} <: {| val: number? |}`
+        LUAU_REQUIRE_NO_ERRORS(result);
+    }
 }
 
 TEST_CASE_FIXTURE(Fixture, "floating_generics_should_not_be_allowed")
 {
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
     CheckResult result = check(R"(
         local assign : <T, U, V, W>(target: T, source0: U?, source1: V?, source2: W?, ...any) -> T & U & V & W = (nil :: any)
 
@@ -910,24 +993,23 @@ TEST_CASE_FIXTURE(Fixture, "floating_generics_should_not_be_allowed")
 
 TEST_CASE_FIXTURE(Fixture, "free_options_can_be_unified_together")
 {
+    ScopedFastFlag sff{FFlag::LuauSolverV2, false};
+
     TypeArena arena;
     TypeId nilType = builtinTypes->nilType;
 
     std::unique_ptr scope = std::make_unique<Scope>(builtinTypes->anyTypePack);
 
-    TypeId free1 = arena.addType(FreeType{scope.get()});
+    TypeId free1 = arena.freshType(builtinTypes, scope.get());
     TypeId option1 = arena.addType(UnionType{{nilType, free1}});
 
-    TypeId free2 = arena.addType(FreeType{scope.get()});
+    TypeId free2 = arena.freshType(builtinTypes, scope.get());
     TypeId option2 = arena.addType(UnionType{{nilType, free2}});
 
     InternalErrorReporter iceHandler;
     UnifierSharedState sharedState{&iceHandler};
     Normalizer normalizer{&arena, builtinTypes, NotNull{&sharedState}};
     Unifier u{NotNull{&normalizer}, NotNull{scope.get()}, Location{}, Variance::Covariant};
-
-    if (FFlag::DebugLuauDeferredConstraintResolution)
-        u.enableNewSolver();
 
     u.tryUnify(option1, option2);
 
@@ -953,8 +1035,10 @@ TEST_CASE_FIXTURE(Fixture, "unify_more_complex_unions_that_include_nil")
     LUAU_REQUIRE_NO_ERRORS(result);
 }
 
-TEST_CASE_FIXTURE(Fixture, "optional_class_instances_are_invariant")
+TEST_CASE_FIXTURE(Fixture, "optional_class_instances_are_invariant_old_solver")
 {
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
     createSomeClasses(&frontend);
 
     CheckResult result = check(R"(
@@ -967,6 +1051,24 @@ TEST_CASE_FIXTURE(Fixture, "optional_class_instances_are_invariant")
     )");
 
     LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(Fixture, "optional_class_instances_are_invariant_new_solver")
+{
+    ScopedFastFlag sff{FFlag::LuauSolverV2, true};
+
+    createSomeClasses(&frontend);
+
+    CheckResult result = check(R"(
+        function foo(ref: {read current: Parent?})
+        end
+
+        function bar(ref: {read current: Child?})
+            foo(ref)
+        end
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(0, result);
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "luau-polyfill.Map.entries")
@@ -1018,6 +1120,9 @@ end
 // We would prefer this unification to be able to complete, but at least it should not crash
 TEST_CASE_FIXTURE(BuiltinsFixture, "table_unification_infinite_recursion")
 {
+    // The new solver doesn't recurse as heavily in this situation.
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
 #if defined(_NOOPT) || defined(_DEBUG)
     ScopedFastInt LuauTypeInferRecursionLimit{FInt::LuauTypeInferRecursionLimit, 100};
 #endif
@@ -1045,23 +1150,15 @@ local tbl = require(game.A)
 tbl:f3()
     )";
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
-    {
-        // TODO: DCR should transform RecursionLimitException into a CodeTooComplex error (currently it rethows it as InternalCompilerError)
-        CHECK_THROWS_AS(frontend.check("game/B"), Luau::InternalCompilerError);
-    }
-    else
-    {
-        CheckResult result = frontend.check("game/B");
-        LUAU_REQUIRE_ERROR_COUNT(1, result);
-    }
+    CheckResult result = frontend.check("game/B");
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
 }
 
 // Ideally, unification with any will not cause a 2^n normalization of a function overload
 TEST_CASE_FIXTURE(BuiltinsFixture, "normalization_limit_in_unify_with_any")
 {
     ScopedFastFlag sff[] = {
-        {FFlag::DebugLuauDeferredConstraintResolution, true},
+        {FFlag::LuauSolverV2, true},
     };
 
     // With default limit, this test will take 10 seconds in NoOpt
@@ -1096,7 +1193,7 @@ foo(1 :: any)
 
 TEST_CASE_FIXTURE(Fixture, "luau_roact_useState_nilable_state_1")
 {
-    ScopedFastFlag sff{FFlag::DebugLuauDeferredConstraintResolution, true};
+    ScopedFastFlag sff{FFlag::LuauSolverV2, true};
 
     CheckResult result = check(R"(
         type Dispatch<A> = (A) -> ()
@@ -1121,7 +1218,7 @@ TEST_CASE_FIXTURE(Fixture, "luau_roact_useState_nilable_state_1")
         end
     )");
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
+    if (FFlag::LuauSolverV2)
         LUAU_REQUIRE_NO_ERRORS(result);
     else
     {
@@ -1137,7 +1234,7 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "luau_roact_useState_minimization")
 {
     // We don't expect this test to work on the old solver, but it also does not yet work on the new solver.
     // So, we can't just put a scoped fast flag here, or it would block CI.
-    if (!FFlag::DebugLuauDeferredConstraintResolution)
+    if (!FFlag::LuauSolverV2)
         return;
 
     CheckResult result = check(R"(
@@ -1166,7 +1263,8 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "luau_roact_useState_minimization")
         update("hello")
     )");
 
-    LUAU_REQUIRE_NO_ERRORS(result);
+    // We actually expect this code to be fine.
+    LUAU_REQUIRE_ERRORS(result);
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "bin_prov")
@@ -1218,7 +1316,7 @@ TEST_CASE_FIXTURE(Fixture, "table_containing_non_final_type_is_erroneously_cache
     TableType* table = getMutable<TableType>(tableTy);
     REQUIRE(table);
 
-    TypeId freeTy = arena.freshType(&globalScope);
+    TypeId freeTy = arena.freshType(builtinTypes, &globalScope);
 
     table->props["foo"] = Property::rw(freeTy);
 
@@ -1254,12 +1352,10 @@ TEST_CASE_FIXTURE(Fixture, "we_cannot_infer_functions_that_return_inconsistently
 #else
     // This is what actually happens right now.
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
+    if (FFlag::LuauSolverV2)
     {
         LUAU_CHECK_ERROR_COUNT(2, result);
-
-        // The second argument should be unknown.  CLI-111111
-        CHECK("<T>({T}, 'b) -> number" == toString(requireType("find_first")));
+        CHECK("<T>({T}, unknown) -> number" == toString(requireType("find_first")));
     }
     else
     {

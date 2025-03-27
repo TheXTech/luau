@@ -14,7 +14,7 @@
 
 using namespace Luau;
 
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution)
+LUAU_FASTFLAG(LuauSolverV2)
 
 TEST_SUITE_BEGIN("Generalization");
 
@@ -29,7 +29,7 @@ struct GeneralizationFixture
     DenseHashSet<TypeId> generalizedTypes_{nullptr};
     NotNull<DenseHashSet<TypeId>> generalizedTypes{&generalizedTypes_};
 
-    ScopedFastFlag sff{FFlag::DebugLuauDeferredConstraintResolution, true};
+    ScopedFastFlag sff{FFlag::LuauSolverV2, true};
 
     std::pair<TypeId, FreeType*> freshType()
     {
@@ -125,8 +125,9 @@ TEST_CASE_FIXTURE(GeneralizationFixture, "cache_fully_generalized_types")
 {
     CHECK(generalizedTypes->empty());
 
-    TypeId tinyTable = arena.addType(TableType{
-        TableType::Props{{"one", builtinTypes.numberType}, {"two", builtinTypes.stringType}}, std::nullopt, TypeLevel{}, TableState::Sealed});
+    TypeId tinyTable = arena.addType(
+        TableType{TableType::Props{{"one", builtinTypes.numberType}, {"two", builtinTypes.stringType}}, std::nullopt, TypeLevel{}, TableState::Sealed}
+    );
 
     generalize(tinyTable);
 
@@ -141,8 +142,9 @@ TEST_CASE_FIXTURE(GeneralizationFixture, "dont_cache_types_that_arent_done_yet")
 
     TypeId fnTy = arena.addType(FunctionType{builtinTypes.emptyTypePack, arena.addTypePack(TypePack{{builtinTypes.numberType}})});
 
-    TypeId tableTy = arena.addType(TableType{
-        TableType::Props{{"one", builtinTypes.numberType}, {"two", freeTy}, {"three", fnTy}}, std::nullopt, TypeLevel{}, TableState::Sealed});
+    TypeId tableTy = arena.addType(
+        TableType{TableType::Props{{"one", builtinTypes.numberType}, {"two", freeTy}, {"three", fnTy}}, std::nullopt, TypeLevel{}, TableState::Sealed}
+    );
 
     generalize(tableTy);
 
@@ -164,7 +166,8 @@ TEST_CASE_FIXTURE(GeneralizationFixture, "functions_containing_cyclic_tables_can
     });
 
     asMutable(selfTy)->ty.emplace<TableType>(
-        TableType::Props{{"count", builtinTypes.numberType}, {"method", methodTy}}, std::nullopt, TypeLevel{}, TableState::Sealed);
+        TableType::Props{{"count", builtinTypes.numberType}, {"method", methodTy}}, std::nullopt, TypeLevel{}, TableState::Sealed
+    );
 
     generalize(methodTy);
 
@@ -176,9 +179,9 @@ TEST_CASE_FIXTURE(GeneralizationFixture, "functions_containing_cyclic_tables_can
 TEST_CASE_FIXTURE(GeneralizationFixture, "union_type_traversal_doesnt_crash")
 {
     // t1 where t1 = ('h <: (t1 <: 'i)) | ('j <: (t1 <: 'i))
-    TypeId i = arena.addType(FreeType{NotNull{globalScope.get()}});
-    TypeId h = arena.addType(FreeType{NotNull{globalScope.get()}});
-    TypeId j = arena.addType(FreeType{NotNull{globalScope.get()}});
+    TypeId i = arena.freshType(NotNull{&builtinTypes}, globalScope.get());
+    TypeId h = arena.freshType(NotNull{&builtinTypes}, globalScope.get());
+    TypeId j = arena.freshType(NotNull{&builtinTypes}, globalScope.get());
     TypeId unionType = arena.addType(UnionType{{h, j}});
     getMutable<FreeType>(h)->upperBound = i;
     getMutable<FreeType>(h)->lowerBound = builtinTypes.neverType;
@@ -193,9 +196,9 @@ TEST_CASE_FIXTURE(GeneralizationFixture, "union_type_traversal_doesnt_crash")
 TEST_CASE_FIXTURE(GeneralizationFixture, "intersection_type_traversal_doesnt_crash")
 {
     // t1 where t1 = ('h <: (t1 <: 'i)) & ('j <: (t1 <: 'i))
-    TypeId i = arena.addType(FreeType{NotNull{globalScope.get()}});
-    TypeId h = arena.addType(FreeType{NotNull{globalScope.get()}});
-    TypeId j = arena.addType(FreeType{NotNull{globalScope.get()}});
+    TypeId i = arena.freshType(NotNull{&builtinTypes}, globalScope.get());
+    TypeId h = arena.freshType(NotNull{&builtinTypes}, globalScope.get());
+    TypeId j = arena.freshType(NotNull{&builtinTypes}, globalScope.get());
     TypeId intersectionType = arena.addType(IntersectionType{{h, j}});
 
     getMutable<FreeType>(h)->upperBound = i;

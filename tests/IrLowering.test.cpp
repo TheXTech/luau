@@ -1,6 +1,7 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "lua.h"
 #include "lualib.h"
+#include "luacode.h"
 
 #include "Luau/BytecodeBuilder.h"
 #include "Luau/CodeGen.h"
@@ -15,14 +16,65 @@
 #include <memory>
 #include <string_view>
 
-LUAU_FASTFLAG(LuauCompileUserdataInfo)
-LUAU_FASTFLAG(LuauCompileFastcall3)
-LUAU_FASTFLAG(LuauCodegenFastcall3)
-
-static std::string getCodegenAssembly(const char* source, bool includeIrTypes = false, int debugLevel = 1)
+static void luauLibraryConstantLookup(const char* library, const char* member, Luau::CompileConstant* constant)
 {
-    Luau::CodeGen::AssemblyOptions options;
+    // While 'vector' library constants are a Luau built-in, their constant value depends on the embedder LUA_VECTOR_SIZE value
+    if (strcmp(library, "vector") == 0)
+    {
+        if (strcmp(member, "zero") == 0)
+            return Luau::setCompileConstantVector(constant, 0.0f, 0.0f, 0.0f, 0.0f);
 
+        if (strcmp(member, "one") == 0)
+            return Luau::setCompileConstantVector(constant, 1.0f, 1.0f, 1.0f, 0.0f);
+    }
+
+    if (strcmp(library, "Vector3") == 0)
+    {
+        if (strcmp(member, "xAxis") == 0)
+            return Luau::setCompileConstantVector(constant, 1.0f, 0.0f, 0.0f, 0.0f);
+
+        if (strcmp(member, "yAxis") == 0)
+            return Luau::setCompileConstantVector(constant, 0.0f, 1.0f, 0.0f, 0.0f);
+    }
+}
+
+static void luauLibraryConstantLookupC(const char* library, const char* member, lua_CompileConstant* constant)
+{
+    if (strcmp(library, "test") == 0)
+    {
+        if (strcmp(member, "some_nil") == 0)
+            return luau_set_compile_constant_nil(constant);
+
+        if (strcmp(member, "some_boolean") == 0)
+            return luau_set_compile_constant_boolean(constant, 1);
+
+        if (strcmp(member, "some_number") == 0)
+            return luau_set_compile_constant_number(constant, 4.75);
+
+        if (strcmp(member, "some_vector") == 0)
+            return luau_set_compile_constant_vector(constant, 1.0f, 2.0f, 4.0f, 8.0f);
+
+        if (strcmp(member, "some_string") == 0)
+            return luau_set_compile_constant_string(constant, "test", 4);
+    }
+}
+
+static int luauLibraryTypeLookup(const char* library, const char* member)
+{
+    if (strcmp(library, "Vector3") == 0)
+    {
+        if (strcmp(member, "xAxis") == 0)
+            return LuauBytecodeType::LBC_TYPE_VECTOR;
+
+        if (strcmp(member, "yAxis") == 0)
+            return LuauBytecodeType::LBC_TYPE_VECTOR;
+    }
+
+    return LuauBytecodeType::LBC_TYPE_ANY;
+}
+
+static void setupAssemblyOptions(Luau::CodeGen::AssemblyOptions& options, bool includeIrTypes)
+{
     options.compilationOptions.hooks.vectorAccessBytecodeType = vectorAccessBytecodeType;
     options.compilationOptions.hooks.vectorNamecallBytecodeType = vectorNamecallBytecodeType;
     options.compilationOptions.hooks.vectorAccess = vectorAccess;
@@ -48,7 +100,42 @@ static std::string getCodegenAssembly(const char* source, bool includeIrTypes = 
     options.includeUseInfo = Luau::CodeGen::IncludeUseInfo::No;
     options.includeCfgInfo = Luau::CodeGen::IncludeCfgInfo::No;
     options.includeRegFlowInfo = Luau::CodeGen::IncludeRegFlowInfo::No;
+}
 
+static void initializeCodegen(lua_State* L)
+{
+    if (Luau::CodeGen::isSupported())
+    {
+        // Type remapper requires the codegen runtime
+        Luau::CodeGen::create(L);
+
+        Luau::CodeGen::setUserdataRemapper(
+            L,
+            kUserdataRunTypes,
+            [](void* context, const char* str, size_t len) -> uint8_t
+            {
+                const char** types = (const char**)context;
+
+                uint8_t index = 0;
+
+                std::string_view sv{str, len};
+
+                for (; *types; ++types)
+                {
+                    if (sv == *types)
+                        return index;
+
+                    index++;
+                }
+
+                return 0xff;
+            }
+        );
+    }
+}
+
+static std::string getCodegenAssembly(const char* source, bool includeIrTypes = false, int debugLevel = 1)
+{
     Luau::Allocator allocator;
     Luau::AstNameTable names(allocator);
     Luau::ParseResult result = Luau::Parser::parse(source, strlen(source), names, allocator);
@@ -67,6 +154,12 @@ static std::string getCodegenAssembly(const char* source, bool includeIrTypes = 
     static const char* kUserdataCompileTypes[] = {"vec2", "color", "mat3", nullptr};
     copts.userdataTypes = kUserdataCompileTypes;
 
+    static const char* kLibrariesWithConstants[] = {"vector", "Vector3", nullptr};
+    copts.librariesWithKnownMembers = kLibrariesWithConstants;
+
+    copts.libraryMemberTypeCb = luauLibraryTypeLookup;
+    copts.libraryMemberConstantCb = luauLibraryConstantLookup;
+
     Luau::BytecodeBuilder bcb;
     Luau::compileOrThrow(bcb, result, names, copts);
 
@@ -74,35 +167,60 @@ static std::string getCodegenAssembly(const char* source, bool includeIrTypes = 
     std::unique_ptr<lua_State, void (*)(lua_State*)> globalState(luaL_newstate(), lua_close);
     lua_State* L = globalState.get();
 
-    // Runtime mapping is specifically created to NOT match the compilation mapping
-    options.compilationOptions.userdataTypes = kUserdataRunTypes;
-
-    if (Luau::CodeGen::isSupported())
-    {
-        // Type remapper requires the codegen runtime
-        Luau::CodeGen::create(L);
-
-        Luau::CodeGen::setUserdataRemapper(L, kUserdataRunTypes, [](void* context, const char* str, size_t len) -> uint8_t {
-            const char** types = (const char**)context;
-
-            uint8_t index = 0;
-
-            std::string_view sv{str, len};
-
-            for (; *types; ++types)
-            {
-                if (sv == *types)
-                    return index;
-
-                index++;
-            }
-
-            return 0xff;
-        });
-    }
+    initializeCodegen(L);
 
     if (luau_load(L, "name", bytecode.data(), bytecode.size(), 0) == 0)
+    {
+        Luau::CodeGen::AssemblyOptions options;
+        setupAssemblyOptions(options, includeIrTypes);
+
+        // Runtime mapping is specifically created to NOT match the compilation mapping
+        options.compilationOptions.userdataTypes = kUserdataRunTypes;
+
         return Luau::CodeGen::getAssembly(L, -1, options, nullptr);
+    }
+
+    FAIL("Failed to load bytecode");
+    return "";
+}
+
+static std::string getCodegenAssemblyUsingCApi(const char* source, bool includeIrTypes = false, int debugLevel = 1)
+{
+    lua_CompileOptions copts = {};
+
+    copts.optimizationLevel = 2;
+    copts.debugLevel = debugLevel;
+    copts.typeInfoLevel = 1;
+
+    static const char* kLibrariesWithConstants[] = {"test", nullptr};
+    copts.librariesWithKnownMembers = kLibrariesWithConstants;
+
+    copts.libraryMemberTypeCb = luauLibraryTypeLookup;
+    copts.libraryMemberConstantCb = luauLibraryConstantLookupC;
+
+    size_t bytecodeSize = 0;
+    char* bytecode = luau_compile(source, strlen(source), &copts, &bytecodeSize);
+    REQUIRE(bytecode);
+
+    std::unique_ptr<lua_State, void (*)(lua_State*)> globalState(luaL_newstate(), lua_close);
+    lua_State* L = globalState.get();
+
+    initializeCodegen(L);
+
+    if (luau_load(L, "name", bytecode, bytecodeSize, 0) == 0)
+    {
+        free(bytecode);
+
+        Luau::CodeGen::AssemblyOptions options;
+        setupAssemblyOptions(options, includeIrTypes);
+
+        // Runtime mapping is specifically created to NOT match the compilation mapping
+        options.compilationOptions.userdataTypes = kUserdataRunTypes;
+
+        return Luau::CodeGen::getAssembly(L, -1, options, nullptr);
+    }
+
+    free(bytecode);
 
     FAIL("Failed to load bytecode");
     return "";
@@ -126,7 +244,8 @@ TEST_SUITE_BEGIN("IrLowering");
 
 TEST_CASE("VectorReciprocal")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(R"(
 local function vecrcp(a: vector)
     return 1 / a
 end
@@ -146,12 +265,14 @@ bb_bytecode_1:
   STORE_TVALUE R1, %9
   INTERRUPT 1u
   RETURN R1, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("VectorComponentRead")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(R"(
 local function compsum(a: vector)
     return a.X + a.Y + a.Z
 end
@@ -173,12 +294,14 @@ bb_bytecode_1:
   STORE_TAG R1, tnumber
   INTERRUPT 8u
   RETURN R1, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("VectorAdd")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(R"(
 local function vec3add(a: vector, b: vector)
     return a + b
 end
@@ -199,12 +322,14 @@ bb_bytecode_1:
   STORE_TVALUE R2, %13
   INTERRUPT 1u
   RETURN R2, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("VectorMinus")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(R"(
 local function vec3minus(a: vector)
     return -a
 end
@@ -223,12 +348,14 @@ bb_bytecode_1:
   STORE_TVALUE R1, %8
   INTERRUPT 1u
   RETURN R1, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("VectorSubMulDiv")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(R"(
 local function vec3combo(a: vector, b: vector, c: vector, d: vector)
     return a * b - c / d
 end
@@ -255,12 +382,14 @@ bb_bytecode_1:
   STORE_TVALUE R4, %35
   INTERRUPT 3u
   RETURN R4, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("VectorSubMulDiv2")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(R"(
 local function vec3combo(a: vector)
     local tmp = a * a
     return (tmp - tmp) / (tmp + tmp)
@@ -283,12 +412,14 @@ bb_bytecode_1:
   STORE_TVALUE R2, %38
   INTERRUPT 4u
   RETURN R2, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("VectorMulDivMixed")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(R"(
 local function vec3combo(a: vector, b: vector, c: vector, d: vector)
     return a * 2 + b / 4 + 0.5 * c + 40 / d
 end
@@ -323,12 +454,14 @@ bb_bytecode_1:
   STORE_TVALUE R4, %68
   INTERRUPT 8u
   RETURN R4, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("ExtraMathMemoryOperands")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(R"(
 local function foo(a: number, b: number, c: number, d: number, e: number)
     return math.floor(a) + math.ceil(b) + math.round(c) + math.sqrt(d) + math.abs(e)
 end
@@ -359,12 +492,14 @@ bb_bytecode_1:
   STORE_TAG R5, tnumber
   INTERRUPT 29u
   RETURN R5, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("DseInitialStackState")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(R"(
 local function foo()
     while {} do
         local _ = not _,{}
@@ -383,9 +518,9 @@ bb_bytecode_0:
   JUMP bb_2
 bb_2:
   CHECK_SAFE_ENV exit(3)
-  JUMP_EQ_TAG K1, tnil, bb_fallback_4, bb_3
+  JUMP_EQ_TAG K1 (nil), tnil, bb_fallback_4, bb_3
 bb_3:
-  %9 = LOAD_TVALUE K1
+  %9 = LOAD_TVALUE K1 (nil)
   STORE_TVALUE R1, %9
   JUMP bb_5
 bb_5:
@@ -397,14 +532,14 @@ bb_5:
   STORE_TAG R0, tnil
   INTERRUPT 9u
   JUMP bb_bytecode_0
-)");
+)"
+    );
 }
 
 TEST_CASE("DseInitialStackState2")
 {
-    ScopedFastFlag luauCodegenFastcall3{FFlag::LuauCodegenFastcall3, true};
-
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(R"(
 local function foo(a)
     math.frexp(a)
     return a
@@ -418,12 +553,14 @@ bb_bytecode_0:
   FASTCALL 14u, R1, R0, 2i
   INTERRUPT 5u
   RETURN R0, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("VectorConstantTag")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(R"(
 local function vecrcp(a: vector)
     return vector(1, 2, 3) + a
 end
@@ -436,19 +573,21 @@ bb_0:
 bb_2:
   JUMP bb_bytecode_1
 bb_bytecode_1:
-  %4 = LOAD_TVALUE K0, 0i, tvector
+  %4 = LOAD_TVALUE K0 (1, 2, 3), 0i, tvector
   %11 = LOAD_TVALUE R0
   %12 = ADD_VEC %4, %11
   %13 = TAG_VECTOR %12
   STORE_TVALUE R1, %13
   INTERRUPT 2u
   RETURN R1, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("VectorNamecall")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(R"(
 local function abs(a: vector)
     return a:Abs()
 end
@@ -461,18 +600,20 @@ bb_0:
 bb_2:
   JUMP bb_bytecode_1
 bb_bytecode_1:
-  FALLBACK_NAMECALL 0u, R1, R0, K0
+  FALLBACK_NAMECALL 0u, R1, R0, K0 ('Abs')
   INTERRUPT 2u
   SET_SAVEDPC 3u
   CALL R1, 1i, -1i
   INTERRUPT 3u
   RETURN R1, -1i
-)");
+)"
+    );
 }
 
 TEST_CASE("VectorRandomProp")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(R"(
 local function foo(a: vector)
     return a.XX + a.YY + a.ZZ
 end
@@ -485,8 +626,8 @@ bb_0:
 bb_2:
   JUMP bb_bytecode_1
 bb_bytecode_1:
-  FALLBACK_GETTABLEKS 0u, R3, R0, K0
-  FALLBACK_GETTABLEKS 2u, R4, R0, K1
+  FALLBACK_GETTABLEKS 0u, R3, R0, K0 ('XX')
+  FALLBACK_GETTABLEKS 2u, R4, R0, K1 ('YY')
   CHECK_TAG R3, tnumber, bb_fallback_3
   CHECK_TAG R4, tnumber, bb_fallback_3
   %14 = LOAD_DOUBLE R3
@@ -496,7 +637,7 @@ bb_bytecode_1:
   JUMP bb_4
 bb_4:
   CHECK_TAG R0, tvector, exit(5)
-  FALLBACK_GETTABLEKS 5u, R3, R0, K2
+  FALLBACK_GETTABLEKS 5u, R3, R0, K2 ('ZZ')
   CHECK_TAG R2, tnumber, bb_fallback_5
   CHECK_TAG R3, tnumber, bb_fallback_5
   %30 = LOAD_DOUBLE R2
@@ -507,14 +648,16 @@ bb_4:
 bb_6:
   INTERRUPT 8u
   RETURN R1, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("VectorCustomAccess")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(R"(
 local function vec3magn(a: vector)
-    return a.Magnitude * 2
+    return a.Magnitude * 3
 end
 )"),
         R"(
@@ -534,17 +677,19 @@ bb_bytecode_1:
   %12 = ADD_NUM %9, %10
   %13 = ADD_NUM %12, %11
   %14 = SQRT_NUM %13
-  %20 = MUL_NUM %14, 2
+  %20 = MUL_NUM %14, 3
   STORE_DOUBLE R1, %20
   STORE_TAG R1, tnumber
   INTERRUPT 3u
   RETURN R1, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("VectorCustomNamecall")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(R"(
 local function vec3dot(a: vector, b: vector)
     return (a:Dot(b))
 end
@@ -575,12 +720,14 @@ bb_bytecode_1:
   STORE_TAG R2, tnumber
   INTERRUPT 4u
   RETURN R2, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("VectorCustomAccessChain")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(R"(
 local function foo(a: vector, b: vector)
     return a.Unit * b.Magnitude
 end
@@ -625,12 +772,14 @@ bb_bytecode_1:
   STORE_TVALUE R2, %44
   INTERRUPT 5u
   RETURN R2, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("VectorCustomNamecallChain")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(R"(
 local function foo(n: vector, b: vector, t: vector)
     return n:Cross(t):Dot(b) + 1
 end
@@ -682,12 +831,14 @@ bb_bytecode_1:
   STORE_TAG R3, tnumber
   INTERRUPT 9u
   RETURN R3, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("VectorCustomNamecallChain2")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(R"(
 type Vertex = {n: vector, b: vector}
 
 local function foo(v: Vertex, t: vector)
@@ -704,8 +855,8 @@ bb_2:
   JUMP bb_bytecode_1
 bb_bytecode_1:
   %8 = LOAD_POINTER R0
-  %9 = GET_SLOT_NODE_ADDR %8, 0u, K1
-  CHECK_SLOT_MATCH %9, K1, bb_fallback_3
+  %9 = GET_SLOT_NODE_ADDR %8, 0u, K1 ('n')
+  CHECK_SLOT_MATCH %9, K1 ('n'), bb_fallback_3
   %11 = LOAD_TVALUE %9, 0i
   STORE_TVALUE R3, %11
   JUMP bb_4
@@ -732,8 +883,8 @@ bb_4:
   STORE_VECTOR R3, %30, %33, %36
   CHECK_TAG R0, ttable, exit(6)
   %41 = LOAD_POINTER R0
-  %42 = GET_SLOT_NODE_ADDR %41, 6u, K3
-  CHECK_SLOT_MATCH %42, K3, bb_fallback_5
+  %42 = GET_SLOT_NODE_ADDR %41, 6u, K3 ('b')
+  CHECK_SLOT_MATCH %42, K3 ('b'), bb_fallback_5
   %44 = LOAD_TVALUE %42, 0i
   STORE_TVALUE R5, %44
   JUMP bb_6
@@ -756,12 +907,14 @@ bb_6:
   STORE_TAG R2, tnumber
   INTERRUPT 12u
   RETURN R2, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("UserDataGetIndex")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(R"(
 local function getxy(a: Point)
     return a.x + a.y
 end
@@ -774,8 +927,8 @@ bb_0:
 bb_2:
   JUMP bb_bytecode_1
 bb_bytecode_1:
-  FALLBACK_GETTABLEKS 0u, R2, R0, K0
-  FALLBACK_GETTABLEKS 2u, R3, R0, K1
+  FALLBACK_GETTABLEKS 0u, R2, R0, K0 ('x')
+  FALLBACK_GETTABLEKS 2u, R3, R0, K1 ('y')
   CHECK_TAG R2, tnumber, bb_fallback_3
   CHECK_TAG R3, tnumber, bb_fallback_3
   %14 = LOAD_DOUBLE R2
@@ -786,12 +939,14 @@ bb_bytecode_1:
 bb_4:
   INTERRUPT 5u
   RETURN R1, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("UserDataSetIndex")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(R"(
 local function setxy(a: Point)
     a.x = 3
     a.y = 4
@@ -807,17 +962,19 @@ bb_2:
 bb_bytecode_1:
   STORE_DOUBLE R1, 3
   STORE_TAG R1, tnumber
-  FALLBACK_SETTABLEKS 1u, R1, R0, K0
+  FALLBACK_SETTABLEKS 1u, R1, R0, K0 ('x')
   STORE_DOUBLE R1, 4
-  FALLBACK_SETTABLEKS 4u, R1, R0, K1
+  FALLBACK_SETTABLEKS 4u, R1, R0, K1 ('y')
   INTERRUPT 6u
   RETURN R0, 0i
-)");
+)"
+    );
 }
 
 TEST_CASE("UserDataNamecall")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(R"(
 local function getxy(a: Point)
     return a:GetX() + a:GetY()
 end
@@ -830,11 +987,11 @@ bb_0:
 bb_2:
   JUMP bb_bytecode_1
 bb_bytecode_1:
-  FALLBACK_NAMECALL 0u, R2, R0, K0
+  FALLBACK_NAMECALL 0u, R2, R0, K0 ('GetX')
   INTERRUPT 2u
   SET_SAVEDPC 3u
   CALL R2, 1i, 1i
-  FALLBACK_NAMECALL 3u, R3, R0, K1
+  FALLBACK_NAMECALL 3u, R3, R0, K1 ('GetY')
   INTERRUPT 5u
   SET_SAVEDPC 6u
   CALL R3, 1i, 1i
@@ -848,12 +1005,15 @@ bb_bytecode_1:
 bb_4:
   INTERRUPT 7u
   RETURN R1, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("ExplicitUpvalueAndLocalTypes")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(
+                   R"(
 local y: vector = ...
 
 local function getsum(t)
@@ -861,7 +1021,8 @@ local function getsum(t)
     return x.X + x.Y + y.X + y.Y
 end
 )",
-                        /* includeIrTypes */ true),
+                   /* includeIrTypes */ true
+               ),
         R"(
 ; function getsum($arg0) line 4
 ; U0: vector
@@ -889,14 +1050,16 @@ bb_bytecode_0:
   STORE_TAG R1, tnumber
   INTERRUPT 13u
   RETURN R1, 1i
-)");
+)"
+    );
 }
 
+#if LUA_VECTOR_SIZE == 3
 TEST_CASE("FastcallTypeInferThroughLocal")
 {
-    ScopedFastFlag sffs[]{{FFlag::LuauCompileFastcall3, true}, {FFlag::LuauCodegenFastcall3, true}};
-
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(
+                   R"(
 local function getsum(x, c)
     local v = vector(x, 2, 3)
     if c then
@@ -906,7 +1069,8 @@ local function getsum(x, c)
     end
 end
 )",
-                        /* includeIrTypes */ true),
+                   /* includeIrTypes */ true
+               ),
         R"(
 ; function getsum($arg0, $arg1) line 2
 ; R2: vector from 0 to 18
@@ -937,14 +1101,15 @@ bb_bytecode_1:
   STORE_TAG R3, tnumber
   INTERRUPT 17u
   RETURN R3, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("FastcallTypeInferThroughUpvalue")
 {
-    ScopedFastFlag sffs[]{{FFlag::LuauCompileFastcall3, true}, {FFlag::LuauCodegenFastcall3, true}};
-
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(
+                   R"(
 local v = ...
 
 local function getsum(x, c)
@@ -956,7 +1121,8 @@ local function getsum(x, c)
     end
 end
 )",
-                        /* includeIrTypes */ true),
+                   /* includeIrTypes */ true
+               ),
         R"(
 ; function getsum($arg0, $arg1) line 4
 ; U0: vector
@@ -994,12 +1160,16 @@ bb_bytecode_1:
   STORE_TAG R2, tnumber
   INTERRUPT 21u
   RETURN R2, 1i
-)");
+)"
+    );
 }
+#endif
 
 TEST_CASE("LoadAndMoveTypePropagation")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(
+                   R"(
 local function getsum(n)
     local seqsum = 0
     for i = 1,n do
@@ -1013,7 +1183,8 @@ local function getsum(n)
     return seqsum
 end
 )",
-                        /* includeIrTypes */ true),
+                   /* includeIrTypes */ true
+               ),
         R"(
 ; function getsum($arg0) line 2
 ; R1: number from 0 to 13
@@ -1059,20 +1230,23 @@ bb_bytecode_3:
 bb_bytecode_4:
   INTERRUPT 12u
   RETURN R1, 1i
-)");
+)"
+    );
 }
 
+#if LUA_VECTOR_SIZE == 3
 TEST_CASE("ArgumentTypeRefinement")
 {
-    ScopedFastFlag sffs[]{{FFlag::LuauCompileFastcall3, true}, {FFlag::LuauCodegenFastcall3, true}};
-
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(
+                   R"(
 local function getsum(x, y)
     x = vector(1, y, 3)
     return x.Y + x.Z
 end
 )",
-                        /* includeIrTypes */ true),
+                   /* includeIrTypes */ true
+               ),
         R"(
 ; function getsum($arg0, $arg1) line 2
 ; R0: vector [argument]
@@ -1095,21 +1269,26 @@ bb_bytecode_0:
   STORE_TAG R2, tnumber
   INTERRUPT 14u
   RETURN R2, 1i
-)");
+)"
+    );
 }
+#endif
 
 TEST_CASE("InlineFunctionType")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(
+                   R"(
 local function inl(v: vector, s: number)
     return v.Y * s
 end
 
 local function getsum(x)
-    return inl(x, 2) + inl(x, 5)
+    return inl(x, 3) + inl(x, 5)
 end
 )",
-                        /* includeIrTypes */ true),
+                   /* includeIrTypes */ true
+               ),
         R"(
 ; function inl($arg0, $arg1) line 2
 ; R0: vector [argument]
@@ -1133,7 +1312,7 @@ bb_bytecode_1:
 bb_bytecode_0:
   CHECK_TAG R0, tvector, exit(0)
   %2 = LOAD_FLOAT R0, 4i
-  %8 = MUL_NUM %2, 2
+  %8 = MUL_NUM %2, 3
   %13 = LOAD_FLOAT R0, 4i
   %19 = MUL_NUM %13, 5
   %28 = ADD_NUM %8, %19
@@ -1141,12 +1320,15 @@ bb_bytecode_0:
   STORE_TAG R1, tnumber
   INTERRUPT 7u
   RETURN R1, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("ResolveTablePathTypes")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(
+                   R"(
 type Vertex = {pos: vector, normal: vector}
 
 local function foo(arr: {Vertex}, i)
@@ -1155,7 +1337,9 @@ local function foo(arr: {Vertex}, i)
     return v.pos.Y
 end
 )",
-                        /* includeIrTypes */ true, /* debugLevel */ 2),
+                   /* includeIrTypes */ true,
+                   /* debugLevel */ 2
+               ),
         R"(
 ; function foo(arr, i) line 4
 ; R0: table [argument 'arr']
@@ -1181,8 +1365,8 @@ bb_bytecode_1:
 bb_4:
   CHECK_TAG R2, ttable, exit(1)
   %23 = LOAD_POINTER R2
-  %24 = GET_SLOT_NODE_ADDR %23, 1u, K0
-  CHECK_SLOT_MATCH %24, K0, bb_fallback_5
+  %24 = GET_SLOT_NODE_ADDR %23, 1u, K0 ('pos')
+  CHECK_SLOT_MATCH %24, K0 ('pos'), bb_fallback_5
   %26 = LOAD_TVALUE %24, 0i
   STORE_TVALUE R4, %26
   JUMP bb_6
@@ -1193,12 +1377,14 @@ bb_6:
   STORE_TAG R3, tnumber
   INTERRUPT 5u
   RETURN R3, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("ResolvableSimpleMath")
 {
-    CHECK_EQ("\n" + getCodegenHeader(R"(
+    CHECK_EQ(
+        "\n" + getCodegenHeader(R"(
 type Vertex = { p: vector, uv: vector, n: vector, t: vector, b: vector, h: number }
 local mesh: { vertices: {Vertex}, indices: {number} } = ...
 
@@ -1247,19 +1433,23 @@ end
 ; R12: vector from 75 to 76
 ; R13: vector from 71 to 72
 ; R14: vector from 71 to 72
-)");
+)"
+    );
 }
 
 TEST_CASE("ResolveVectorNamecalls")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(
+                   R"(
 type Vertex = {pos: vector, normal: vector}
 
 local function foo(arr: {Vertex}, i)
     return arr[i].normal:Dot(vector(0.707, 0, 0.707))
 end
 )",
-                        /* includeIrTypes */ true),
+                   /* includeIrTypes */ true
+               ),
         R"(
 ; function foo($arg0, $arg1) line 4
 ; R0: table [argument]
@@ -1284,13 +1474,13 @@ bb_bytecode_1:
 bb_4:
   CHECK_TAG R3, ttable, bb_fallback_5
   %23 = LOAD_POINTER R3
-  %24 = GET_SLOT_NODE_ADDR %23, 1u, K0
-  CHECK_SLOT_MATCH %24, K0, bb_fallback_5
+  %24 = GET_SLOT_NODE_ADDR %23, 1u, K0 ('normal')
+  CHECK_SLOT_MATCH %24, K0 ('normal'), bb_fallback_5
   %26 = LOAD_TVALUE %24, 0i
   STORE_TVALUE R2, %26
   JUMP bb_6
 bb_6:
-  %31 = LOAD_TVALUE K1, 0i, tvector
+  %31 = LOAD_TVALUE K1 (0.707000017, 0, 0.707000017), 0i, tvector
   STORE_TVALUE R4, %31
   CHECK_TAG R2, tvector, exit(4)
   %37 = LOAD_FLOAT R2, 0i
@@ -1309,17 +1499,21 @@ bb_6:
   ADJUST_STACK_TO_REG R2, 1i
   INTERRUPT 7u
   RETURN R2, -1i
-)");
+)"
+    );
 }
 
 TEST_CASE("ImmediateTypeAnnotationHelp")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(
+                   R"(
 local function foo(arr, i)
     return (arr[i] :: vector) / 5
 end
 )",
-                        /* includeIrTypes */ true),
+                   /* includeIrTypes */ true
+               ),
         R"(
 ; function foo($arg0, $arg1) line 2
 ; R3: vector from 1 to 2
@@ -1345,14 +1539,15 @@ bb_2:
   STORE_TVALUE R2, %22
   INTERRUPT 2u
   RETURN R2, 1i
-)");
+)"
+    );
 }
 
+#if LUA_VECTOR_SIZE == 3
 TEST_CASE("UnaryTypeResolve")
 {
-    ScopedFastFlag sffs[]{{FFlag::LuauCompileFastcall3, true}, {FFlag::LuauCodegenFastcall3, true}};
-
-    CHECK_EQ("\n" + getCodegenHeader(R"(
+    CHECK_EQ(
+        "\n" + getCodegenHeader(R"(
 local function foo(a, b: vector, c)
     local d = not a
     local e = -b
@@ -1367,12 +1562,16 @@ end
 ; R4: vector from 1 to 17 [local 'e']
 ; R5: number from 2 to 17 [local 'f']
 ; R7: vector from 14 to 16
-)");
+)"
+    );
 }
+#endif
 
 TEST_CASE("ForInManualAnnotation")
 {
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(
+                   R"(
 type Vertex = {pos: vector, normal: vector}
 
 local function foo(a: {Vertex})
@@ -1383,7 +1582,9 @@ local function foo(a: {Vertex})
     return sum
 end
 )",
-                        /* includeIrTypes */ true, /* debugLevel */ 2),
+                   /* includeIrTypes */ true,
+                   /* debugLevel */ 2
+               ),
         R"(
 ; function foo(a) line 4
 ; R0: table [argument 'a']
@@ -1400,9 +1601,9 @@ bb_bytecode_1:
   STORE_DOUBLE R1, 0
   STORE_TAG R1, tnumber
   CHECK_SAFE_ENV exit(1)
-  JUMP_EQ_TAG K1, tnil, bb_fallback_6, bb_5
+  JUMP_EQ_TAG K1 (nil), tnil, bb_fallback_6, bb_5
 bb_5:
-  %9 = LOAD_TVALUE K1
+  %9 = LOAD_TVALUE K1 (nil)
   STORE_TVALUE R2, %9
   JUMP bb_7
 bb_7:
@@ -1424,8 +1625,8 @@ bb_9:
 bb_bytecode_2:
   CHECK_TAG R6, ttable, exit(6)
   %35 = LOAD_POINTER R6
-  %36 = GET_SLOT_NODE_ADDR %35, 6u, K2
-  CHECK_SLOT_MATCH %36, K2, bb_fallback_10
+  %36 = GET_SLOT_NODE_ADDR %35, 6u, K2 ('pos')
+  CHECK_SLOT_MATCH %36, K2 ('pos'), bb_fallback_10
   %38 = LOAD_TVALUE %36, 0i
   STORE_TVALUE R8, %38
   JUMP bb_11
@@ -1460,12 +1661,14 @@ bb_14:
 bb_12:
   INTERRUPT 13u
   RETURN R1, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("ForInAutoAnnotationIpairs")
 {
-    CHECK_EQ("\n" + getCodegenHeader(R"(
+    CHECK_EQ(
+        "\n" + getCodegenHeader(R"(
 type Vertex = {pos: vector, normal: vector}
 
 local function foo(a: {Vertex})
@@ -1485,12 +1688,14 @@ end
 ; R6: table from 5 to 11 [local 'v']
 ; R7: number from 6 to 11 [local 'n']
 ; R8: vector from 8 to 10
-)");
+)"
+    );
 }
 
 TEST_CASE("ForInAutoAnnotationPairs")
 {
-    CHECK_EQ("\n" + getCodegenHeader(R"(
+    CHECK_EQ(
+        "\n" + getCodegenHeader(R"(
 type Vertex = {pos: vector, normal: vector}
 
 local function foo(a: {[string]: Vertex})
@@ -1510,12 +1715,14 @@ end
 ; R6: table from 5 to 11 [local 'v']
 ; R7: number from 6 to 11 [local 'n']
 ; R8: vector from 8 to 10
-)");
+)"
+    );
 }
 
 TEST_CASE("ForInAutoAnnotationGeneric")
 {
-    CHECK_EQ("\n" + getCodegenHeader(R"(
+    CHECK_EQ(
+        "\n" + getCodegenHeader(R"(
 type Vertex = {pos: vector, normal: vector}
 
 local function foo(a: {Vertex})
@@ -1535,28 +1742,8 @@ end
 ; R6: table from 4 to 10 [local 'v']
 ; R7: number from 5 to 10 [local 'n']
 ; R8: vector from 7 to 9
-)");
-}
-
-// Temporary test, when we don't compile new typeinfo, but support loading it
-TEST_CASE("CustomUserdataTypesTemp")
-{
-    // This test requires runtime component to be present
-    if (!Luau::CodeGen::isSupported())
-        return;
-
-    ScopedFastFlag sffs[]{{FFlag::LuauCompileUserdataInfo, false}};
-
-    CHECK_EQ("\n" + getCodegenHeader(R"(
-local function foo(v: vec2, x: mat3)
-    return v.X * x
-end
-)"),
-        R"(
-; function foo(v, x) line 2
-; R0: userdata [argument 'v']
-; R1: userdata [argument 'x']
-)");
+)"
+    );
 }
 
 TEST_CASE("CustomUserdataTypes")
@@ -1565,9 +1752,8 @@ TEST_CASE("CustomUserdataTypes")
     if (!Luau::CodeGen::isSupported())
         return;
 
-    ScopedFastFlag sffs[]{{FFlag::LuauCompileUserdataInfo, true}};
-
-    CHECK_EQ("\n" + getCodegenHeader(R"(
+    CHECK_EQ(
+        "\n" + getCodegenHeader(R"(
 local function foo(v: vec2, x: mat3)
     return v.X * x
 end
@@ -1576,7 +1762,8 @@ end
 ; function foo(v, x) line 2
 ; R0: vec2 [argument 'v']
 ; R1: mat3 [argument 'x']
-)");
+)"
+    );
 }
 
 TEST_CASE("CustomUserdataPropertyAccess")
@@ -1585,14 +1772,15 @@ TEST_CASE("CustomUserdataPropertyAccess")
     if (!Luau::CodeGen::isSupported())
         return;
 
-    ScopedFastFlag sffs[]{{FFlag::LuauCompileUserdataInfo, true}};
-
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(
+                   R"(
 local function foo(v: vec2)
     return v.X + v.Y
 end
 )",
-                        /* includeIrTypes */ true),
+                   /* includeIrTypes */ true
+               ),
         R"(
 ; function foo($arg0) line 2
 ; R0: vec2 [argument]
@@ -1611,7 +1799,8 @@ bb_bytecode_1:
   STORE_TAG R1, tnumber
   INTERRUPT 5u
   RETURN R1, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("CustomUserdataPropertyAccess2")
@@ -1620,14 +1809,15 @@ TEST_CASE("CustomUserdataPropertyAccess2")
     if (!Luau::CodeGen::isSupported())
         return;
 
-    ScopedFastFlag sffs[]{{FFlag::LuauCompileUserdataInfo, true}};
-
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(
+                   R"(
 local function foo(a: mat3)
     return a.Row1 * a.Row2
 end
 )",
-                        /* includeIrTypes */ true),
+                   /* includeIrTypes */ true
+               ),
         R"(
 ; function foo($arg0) line 2
 ; R0: mat3 [argument]
@@ -1637,8 +1827,8 @@ bb_0:
 bb_2:
   JUMP bb_bytecode_1
 bb_bytecode_1:
-  FALLBACK_GETTABLEKS 0u, R2, R0, K0
-  FALLBACK_GETTABLEKS 2u, R3, R0, K1
+  FALLBACK_GETTABLEKS 0u, R2, R0, K0 ('Row1')
+  FALLBACK_GETTABLEKS 2u, R3, R0, K1 ('Row2')
   CHECK_TAG R2, tvector, exit(4)
   CHECK_TAG R3, tvector, exit(4)
   %14 = LOAD_TVALUE R2
@@ -1648,7 +1838,8 @@ bb_bytecode_1:
   STORE_TVALUE R1, %17
   INTERRUPT 5u
   RETURN R1, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("CustomUserdataNamecall1")
@@ -1657,14 +1848,15 @@ TEST_CASE("CustomUserdataNamecall1")
     if (!Luau::CodeGen::isSupported())
         return;
 
-    ScopedFastFlag sffs[]{{FFlag::LuauCompileUserdataInfo, true}};
-
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(
+                   R"(
 local function foo(a: vec2, b: vec2)
     return a:Dot(b)
 end
 )",
-                        /* includeIrTypes */ true),
+                   /* includeIrTypes */ true
+               ),
         R"(
 ; function foo($arg0, $arg1) line 2
 ; R0: vec2 [argument]
@@ -1694,7 +1886,8 @@ bb_bytecode_1:
   ADJUST_STACK_TO_REG R2, 1i
   INTERRUPT 4u
   RETURN R2, -1i
-)");
+)"
+    );
 }
 
 TEST_CASE("CustomUserdataNamecall2")
@@ -1703,14 +1896,15 @@ TEST_CASE("CustomUserdataNamecall2")
     if (!Luau::CodeGen::isSupported())
         return;
 
-    ScopedFastFlag sffs[]{{FFlag::LuauCompileUserdataInfo, true}};
-
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(
+                   R"(
 local function foo(a: vec2, b: vec2)
     return a:Min(b)
 end
 )",
-                        /* includeIrTypes */ true),
+                   /* includeIrTypes */ true
+               ),
         R"(
 ; function foo($arg0, $arg1) line 2
 ; R0: vec2 [argument]
@@ -1743,7 +1937,8 @@ bb_bytecode_1:
   ADJUST_STACK_TO_REG R2, 1i
   INTERRUPT 4u
   RETURN R2, -1i
-)");
+)"
+    );
 }
 
 TEST_CASE("CustomUserdataMetamethodDirectFlow")
@@ -1752,14 +1947,15 @@ TEST_CASE("CustomUserdataMetamethodDirectFlow")
     if (!Luau::CodeGen::isSupported())
         return;
 
-    ScopedFastFlag sffs[]{{FFlag::LuauCompileUserdataInfo, true}};
-
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(
+                   R"(
 local function foo(a: mat3, b: mat3)
     return a * b
 end
 )",
-                        /* includeIrTypes */ true),
+                   /* includeIrTypes */ true
+               ),
         R"(
 ; function foo($arg0, $arg1) line 2
 ; R0: mat3 [argument]
@@ -1775,7 +1971,8 @@ bb_bytecode_1:
   DO_ARITH R2, R0, R1, 10i
   INTERRUPT 1u
   RETURN R2, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("CustomUserdataMetamethodDirectFlow2")
@@ -1784,14 +1981,15 @@ TEST_CASE("CustomUserdataMetamethodDirectFlow2")
     if (!Luau::CodeGen::isSupported())
         return;
 
-    ScopedFastFlag sffs[]{{FFlag::LuauCompileUserdataInfo, true}};
-
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(
+                   R"(
 local function foo(a: mat3)
     return -a
 end
 )",
-                        /* includeIrTypes */ true),
+                   /* includeIrTypes */ true
+               ),
         R"(
 ; function foo($arg0) line 2
 ; R0: mat3 [argument]
@@ -1805,7 +2003,8 @@ bb_bytecode_1:
   DO_ARITH R1, R0, R0, 15i
   INTERRUPT 1u
   RETURN R1, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("CustomUserdataMetamethodDirectFlow3")
@@ -1814,14 +2013,15 @@ TEST_CASE("CustomUserdataMetamethodDirectFlow3")
     if (!Luau::CodeGen::isSupported())
         return;
 
-    ScopedFastFlag sffs[]{{FFlag::LuauCompileUserdataInfo, true}};
-
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(
+                   R"(
 local function foo(a: sequence)
     return #a
 end
 )",
-                        /* includeIrTypes */ true),
+                   /* includeIrTypes */ true
+               ),
         R"(
 ; function foo($arg0) line 2
 ; R0: userdata [argument]
@@ -1835,7 +2035,8 @@ bb_bytecode_1:
   DO_LEN R1, R0
   INTERRUPT 1u
   RETURN R1, 1i
-)");
+)"
+    );
 }
 
 TEST_CASE("CustomUserdataMetamethod")
@@ -1844,14 +2045,15 @@ TEST_CASE("CustomUserdataMetamethod")
     if (!Luau::CodeGen::isSupported())
         return;
 
-    ScopedFastFlag sffs[]{{FFlag::LuauCompileUserdataInfo, true}};
-
-    CHECK_EQ("\n" + getCodegenAssembly(R"(
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(
+                   R"(
 local function foo(a: vec2, b: vec2, c: vec2)
     return -c + a * b
 end
 )",
-                        /* includeIrTypes */ true),
+                   /* includeIrTypes */ true
+               ),
         R"(
 ; function foo($arg0, $arg1, $arg2) line 2
 ; R0: vec2 [argument]
@@ -1905,7 +2107,107 @@ bb_bytecode_1:
   STORE_TAG R3, tuserdata
   INTERRUPT 3u
   RETURN R3, 1i
-)");
+)"
+    );
+}
+
+TEST_CASE("LibraryFieldTypesAndConstants")
+{
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(
+                   R"(
+local function foo(a: vector)
+    return Vector3.xAxis * a + Vector3.yAxis
+end
+)",
+                   /* includeIrTypes */ true
+               ),
+        R"(
+; function foo($arg0) line 2
+; R0: vector [argument]
+; R2: vector from 3 to 4
+; R3: vector from 1 to 2
+; R3: vector from 3 to 4
+bb_0:
+  CHECK_TAG R0, tvector, exit(entry)
+  JUMP bb_2
+bb_2:
+  JUMP bb_bytecode_1
+bb_bytecode_1:
+  %4 = LOAD_TVALUE K0 (1, 0, 0), 0i, tvector
+  %11 = LOAD_TVALUE R0
+  %12 = MUL_VEC %4, %11
+  %15 = LOAD_TVALUE K1 (0, 1, 0), 0i, tvector
+  %23 = ADD_VEC %12, %15
+  %24 = TAG_VECTOR %23
+  STORE_TVALUE R1, %24
+  INTERRUPT 4u
+  RETURN R1, 1i
+)"
+    );
+}
+
+TEST_CASE("LibraryFieldTypesAndConstants")
+{
+    CHECK_EQ(
+        "\n" + getCodegenAssembly(
+                   R"(
+local function foo(a: vector)
+    local x = vector.zero
+    x += a
+    return x
+end
+)",
+                   /* includeIrTypes */ true
+               ),
+        R"(
+; function foo($arg0) line 2
+; R0: vector [argument]
+; R1: vector from 0 to 3
+bb_0:
+  CHECK_TAG R0, tvector, exit(entry)
+  JUMP bb_2
+bb_2:
+  JUMP bb_bytecode_1
+bb_bytecode_1:
+  %4 = LOAD_TVALUE K0 (0, 0, 0), 0i, tvector
+  %11 = LOAD_TVALUE R0
+  %12 = ADD_VEC %4, %11
+  %13 = TAG_VECTOR %12
+  STORE_TVALUE R1, %13
+  INTERRUPT 2u
+  RETURN R1, 1i
+)"
+    );
+}
+
+TEST_CASE("LibraryFieldTypesAndConstantsCApi")
+{
+    CHECK_EQ(
+        "\n" + getCodegenAssemblyUsingCApi(
+                   R"(
+local function foo()
+    return test.some_nil, test.some_boolean, test.some_number, test.some_vector, test.some_string
+end
+)",
+                   /* includeIrTypes */ true
+               ),
+        R"(
+; function foo() line 2
+bb_bytecode_0:
+  STORE_TAG R0, tnil
+  STORE_INT R1, 1i
+  STORE_TAG R1, tboolean
+  STORE_DOUBLE R2, 4.75
+  STORE_TAG R2, tnumber
+  %5 = LOAD_TVALUE K1 (1, 2, 4), 0i, tvector
+  STORE_TVALUE R3, %5
+  %7 = LOAD_TVALUE K2 ('test'), 0i, tstring
+  STORE_TVALUE R4, %7
+  INTERRUPT 5u
+  RETURN R0, 5i
+)"
+    );
 }
 
 TEST_SUITE_END();

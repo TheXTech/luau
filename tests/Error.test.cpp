@@ -6,7 +6,7 @@
 
 using namespace Luau;
 
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution)
+LUAU_FASTFLAG(LuauSolverV2)
 
 TEST_SUITE_BEGIN("ErrorTests");
 
@@ -47,9 +47,11 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "binary_op_type_function_errors")
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
-        CHECK_EQ("Operator '+' could not be applied to operands of types number and string; there is no corresponding overload for __add",
-            toString(result.errors[0]));
+    if (FFlag::LuauSolverV2)
+        CHECK_EQ(
+            "Operator '+' could not be applied to operands of types number and string; there is no corresponding overload for __add",
+            toString(result.errors[0])
+        );
     else
         CHECK_EQ("Type 'string' could not be converted into 'number'", toString(result.errors[0]));
 }
@@ -64,11 +66,12 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "unary_op_type_function_errors")
     )");
 
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
+    if (FFlag::LuauSolverV2)
     {
         LUAU_REQUIRE_ERROR_COUNT(2, result);
         CHECK_EQ(
-            "Operator '-' could not be applied to operand of type string; there is no corresponding overload for __unm", toString(result.errors[0]));
+            "Operator '-' could not be applied to operand of type string; there is no corresponding overload for __unm", toString(result.errors[0])
+        );
         CHECK_EQ("Type 'string' could not be converted into 'number'", toString(result.errors[1]));
     }
     else

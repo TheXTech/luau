@@ -1,8 +1,8 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/IrRegAllocX64.h"
 
-#include "Luau/CodeGen.h"
 #include "Luau/IrUtils.h"
+#include "Luau/LoweringStats.h"
 
 #include "EmitCommonX64.h"
 
@@ -170,7 +170,8 @@ void IrRegAllocX64::freeLastUseReg(IrInst& target, uint32_t instIdx)
 
 void IrRegAllocX64::freeLastUseRegs(const IrInst& inst, uint32_t instIdx)
 {
-    auto checkOp = [this, instIdx](IrOp op) {
+    auto checkOp = [this, instIdx](IrOp op)
+    {
         if (op.kind == IrOpKind::Inst)
             freeLastUseReg(function.instructions[op.index], instIdx);
     };

@@ -10,16 +10,14 @@
 
 #include <algorithm>
 
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution)
-LUAU_FASTFLAG(LuauReusableSubstitutions)
+LUAU_FASTFLAG(LuauSolverV2)
+LUAU_FASTFLAG(LuauFreeTypesMustHaveBounds)
 
 namespace Luau
 {
 
 void Instantiation::resetState(const TxnLog* log, TypeArena* arena, NotNull<BuiltinTypes> builtinTypes, TypeLevel level, Scope* scope)
 {
-    LUAU_ASSERT(FFlag::LuauReusableSubstitutions);
-
     Substitution::resetState(log, arena);
 
     this->builtinTypes = builtinTypes;
@@ -64,33 +62,18 @@ TypeId Instantiation::clean(TypeId ty)
     LUAU_ASSERT(ftv);
 
     FunctionType clone = FunctionType{level, scope, ftv->argTypes, ftv->retTypes, ftv->definition, ftv->hasSelf};
-    clone.magicFunction = ftv->magicFunction;
-    clone.dcrMagicFunction = ftv->dcrMagicFunction;
-    clone.dcrMagicRefinement = ftv->dcrMagicRefinement;
+    clone.magic = ftv->magic;
     clone.tags = ftv->tags;
     clone.argNames = ftv->argNames;
     TypeId result = addType(std::move(clone));
 
-    if (FFlag::LuauReusableSubstitutions)
-    {
-        // Annoyingly, we have to do this even if there are no generics,
-        // to replace any generic tables.
-        reusableReplaceGenerics.resetState(log, arena, builtinTypes, level, scope, ftv->generics, ftv->genericPacks);
+    // Annoyingly, we have to do this even if there are no generics,
+    // to replace any generic tables.
+    reusableReplaceGenerics.resetState(log, arena, builtinTypes, level, scope, ftv->generics, ftv->genericPacks);
 
-        // TODO: What to do if this returns nullopt?
-        // We don't have access to the error-reporting machinery
-        result = reusableReplaceGenerics.substitute(result).value_or(result);
-    }
-    else
-    {
-        // Annoyingly, we have to do this even if there are no generics,
-        // to replace any generic tables.
-        ReplaceGenerics replaceGenerics{log, arena, builtinTypes, level, scope, ftv->generics, ftv->genericPacks};
-
-        // TODO: What to do if this returns nullopt?
-        // We don't have access to the error-reporting machinery
-        result = replaceGenerics.substitute(result).value_or(result);
-    }
+    // TODO: What to do if this returns nullopt?
+    // We don't have access to the error-reporting machinery
+    result = reusableReplaceGenerics.substitute(result).value_or(result);
 
     asMutable(result)->documentationSymbol = ty->documentationSymbol;
     return result;
@@ -102,11 +85,16 @@ TypePackId Instantiation::clean(TypePackId tp)
     return tp;
 }
 
-void ReplaceGenerics::resetState(const TxnLog* log, TypeArena* arena, NotNull<BuiltinTypes> builtinTypes, TypeLevel level, Scope* scope,
-    const std::vector<TypeId>& generics, const std::vector<TypePackId>& genericPacks)
+void ReplaceGenerics::resetState(
+    const TxnLog* log,
+    TypeArena* arena,
+    NotNull<BuiltinTypes> builtinTypes,
+    TypeLevel level,
+    Scope* scope,
+    const std::vector<TypeId>& generics,
+    const std::vector<TypePackId>& genericPacks
+)
 {
-    LUAU_ASSERT(FFlag::LuauReusableSubstitutions);
-
     Substitution::resetState(log, arena);
 
     this->builtinTypes = builtinTypes;
@@ -168,7 +156,7 @@ TypeId ReplaceGenerics::clean(TypeId ty)
         clone.definitionLocation = ttv->definitionLocation;
         return addType(std::move(clone));
     }
-    else if (FFlag::DebugLuauDeferredConstraintResolution)
+    else if (FFlag::LuauSolverV2)
     {
         TypeId res = freshType(NotNull{arena}, builtinTypes, scope);
         getMutable<FreeType>(res)->level = level;
@@ -176,7 +164,7 @@ TypeId ReplaceGenerics::clean(TypeId ty)
     }
     else
     {
-        return addType(FreeType{scope, level});
+        return FFlag::LuauFreeTypesMustHaveBounds ? arena->freshType(builtinTypes, scope, level) : addType(FreeType{scope, level});
     }
 }
 
@@ -187,7 +175,12 @@ TypePackId ReplaceGenerics::clean(TypePackId tp)
 }
 
 std::optional<TypeId> instantiate(
-    NotNull<BuiltinTypes> builtinTypes, NotNull<TypeArena> arena, NotNull<TypeCheckLimits> limits, NotNull<Scope> scope, TypeId ty)
+    NotNull<BuiltinTypes> builtinTypes,
+    NotNull<TypeArena> arena,
+    NotNull<TypeCheckLimits> limits,
+    NotNull<Scope> scope,
+    TypeId ty
+)
 {
     ty = follow(ty);
 

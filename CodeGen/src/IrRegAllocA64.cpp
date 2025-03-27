@@ -2,15 +2,15 @@
 #include "IrRegAllocA64.h"
 
 #include "Luau/AssemblyBuilderA64.h"
-#include "Luau/CodeGen.h"
 #include "Luau/IrUtils.h"
+#include "Luau/LoweringStats.h"
 
 #include "BitUtils.h"
 #include "EmitCommonA64.h"
 
 #include <string.h>
 
-LUAU_FASTFLAGVARIABLE(DebugCodegenChaosA64, false)
+LUAU_FASTFLAGVARIABLE(DebugCodegenChaosA64)
 
 namespace Luau
 {
@@ -245,7 +245,8 @@ void IrRegAllocA64::freeLastUseReg(IrInst& target, uint32_t index)
 
 void IrRegAllocA64::freeLastUseRegs(const IrInst& inst, uint32_t index)
 {
-    auto checkOp = [this, index](IrOp op) {
+    auto checkOp = [this, index](IrOp op)
+    {
         if (op.kind == IrOpKind::Inst)
             freeLastUseReg(function.instructions[op.index], index);
     };

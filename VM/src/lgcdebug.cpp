@@ -34,7 +34,7 @@ static void validateref(global_State* g, GCObject* f, TValue* v)
     }
 }
 
-static void validatetable(global_State* g, Table* h)
+static void validatetable(global_State* g, LuaTable* h)
 {
     int sizenode = 1 << h->lsizenode;
 
@@ -290,9 +290,9 @@ static void dumpstring(FILE* f, TString* ts)
     fprintf(f, "\"}");
 }
 
-static void dumptable(FILE* f, Table* h)
+static void dumptable(FILE* f, LuaTable* h)
 {
-    size_t size = sizeof(Table) + (h->node == &luaH_dummynode ? 0 : sizenode(h) * sizeof(LuaNode)) + h->sizearray * sizeof(TValue);
+    size_t size = sizeof(LuaTable) + (h->node == &luaH_dummynode ? 0 : sizenode(h) * sizeof(LuaNode)) + h->sizearray * sizeof(TValue);
 
     fprintf(f, "{\"type\":\"table\",\"cat\":%d,\"size\":%d", h->memcat, int(size));
 
@@ -344,8 +344,9 @@ static void dumptable(FILE* f, Table* h)
 
 static void dumpclosure(FILE* f, Closure* cl)
 {
-    fprintf(f, "{\"type\":\"function\",\"cat\":%d,\"size\":%d", cl->memcat,
-        cl->isC ? int(sizeCclosure(cl->nupvalues)) : int(sizeLclosure(cl->nupvalues)));
+    fprintf(
+        f, "{\"type\":\"function\",\"cat\":%d,\"size\":%d", cl->memcat, cl->isC ? int(sizeCclosure(cl->nupvalues)) : int(sizeLclosure(cl->nupvalues))
+    );
 
     fprintf(f, ",\"env\":");
     dumpref(f, obj2gco(cl->env));
@@ -653,9 +654,9 @@ static void enumstring(EnumContext* ctx, TString* ts)
     enumnode(ctx, obj2gco(ts), ts->len, NULL);
 }
 
-static void enumtable(EnumContext* ctx, Table* h)
+static void enumtable(EnumContext* ctx, LuaTable* h)
 {
-    size_t size = sizeof(Table) + (h->node == &luaH_dummynode ? 0 : sizenode(h) * sizeof(LuaNode)) + h->sizearray * sizeof(TValue);
+    size_t size = sizeof(LuaTable) + (h->node == &luaH_dummynode ? 0 : sizenode(h) * sizeof(LuaNode)) + h->sizearray * sizeof(TValue);
 
     // Provide a name for a special registry table
     enumnode(ctx, obj2gco(h), size, h == hvalue(registry(ctx->L)) ? "registry" : NULL);
@@ -753,7 +754,7 @@ static void enumudata(EnumContext* ctx, Udata* u)
 {
     const char* name = NULL;
 
-    if (Table* h = u->metatable)
+    if (LuaTable* h = u->metatable)
     {
         if (h->node != &luaH_dummynode)
         {
@@ -888,8 +889,12 @@ static bool enumgco(void* context, lua_Page* page, GCObject* gco)
     return false;
 }
 
-void luaC_enumheap(lua_State* L, void* context, void (*node)(void* context, void* ptr, uint8_t tt, uint8_t memcat, size_t size, const char* name),
-    void (*edge)(void* context, void* from, void* to, const char* name))
+void luaC_enumheap(
+    lua_State* L,
+    void* context,
+    void (*node)(void* context, void* ptr, uint8_t tt, uint8_t memcat, size_t size, const char* name),
+    void (*edge)(void* context, void* from, void* to, const char* name)
+)
 {
     global_State* g = L->global;
 
