@@ -799,7 +799,7 @@ AstStat* Parser::parseFunctionStat(const AstArray<AstAttr*>& attributes)
 
 std::pair<bool, AstAttr::Type> Parser::validateAttribute(const char* attributeName, const TempVector<AstAttr*>& attributes)
 {
-    AstAttr::Type type;
+    AstAttr::Type type = AstAttr::Type::Checked;
 
     // check if the attribute name is valid
 
@@ -1928,9 +1928,6 @@ std::pair<CstExprConstantString::QuoteStyle, unsigned int> Parser::extractString
         style =
             lexer.current().getQuoteStyle() == Lexeme::QuoteStyle::Double ? CstExprConstantString::QuotedDouble : CstExprConstantString::QuotedSingle;
         break;
-    case Lexeme::InterpStringSimple:
-        style = CstExprConstantString::QuotedInterp;
-        break;
     case Lexeme::RawString:
     {
         style = CstExprConstantString::QuotedRaw;
@@ -1939,6 +1936,10 @@ std::pair<CstExprConstantString::QuoteStyle, unsigned int> Parser::extractString
     }
     default:
         LUAU_ASSERT(false && "Invalid string type");
+    // fallthrough
+    case Lexeme::InterpStringSimple:
+        style = CstExprConstantString::QuotedInterp;
+        break;
     }
 
     return {style, blockDepth};
@@ -2040,7 +2041,7 @@ AstType* Parser::parseTableType(bool inDeclarationContext)
     
                 if ((lexer.current().type == Lexeme::RawString || lexer.current().type == Lexeme::QuotedString) && lexer.lookahead().type == ']')
                 {
-                    CstExprConstantString::QuoteStyle style;
+                    CstExprConstantString::QuoteStyle style = CstExprConstantString::QuotedSingle;
                     unsigned int blockDepth = 0;
                     if (FFlag::LuauStoreCSTData && options.storeCstData)
                         std::tie(style, blockDepth) = extractStringDetails();
@@ -2155,7 +2156,7 @@ AstType* Parser::parseTableType(bool inDeclarationContext)
                 const Lexeme begin = lexer.current();
                 nextLexeme(); // [
 
-                CstExprConstantString::QuoteStyle style;
+                CstExprConstantString::QuoteStyle style = CstExprConstantString::QuotedSingle;
                 unsigned int blockDepth = 0;
                 if (FFlag::LuauStoreCSTData && options.storeCstData)
                     std::tie(style, blockDepth) = extractStringDetails();
@@ -2661,7 +2662,7 @@ AstTypeOrPack Parser::parseSimpleType(bool allowPack, bool inDeclarationContext)
     {
         if (FFlag::LuauStoreCSTData)
         {
-            CstExprConstantString::QuoteStyle style;
+            CstExprConstantString::QuoteStyle style = CstExprConstantString::QuotedSingle;
             unsigned int blockDepth = 0;
             if (options.storeCstData)
                 std::tie(style, blockDepth) = extractStringDetails();
@@ -4060,6 +4061,9 @@ AstExpr* Parser::parseString()
     AstExprConstantString::QuoteStyle style;
     switch (lexer.current().type)
     {
+    default:
+        LUAU_ASSERT(false && "Invalid string type");
+    // fallthrough
     case Lexeme::QuotedString:
     case Lexeme::InterpStringSimple:
         style = AstExprConstantString::QuotedSimple;
@@ -4067,14 +4071,12 @@ AstExpr* Parser::parseString()
     case Lexeme::RawString:
         style = AstExprConstantString::QuotedRaw;
         break;
-    default:
-        LUAU_ASSERT(false && "Invalid string type");
     }
 
     if (FFlag::LuauStoreCSTData)
     {
-        CstExprConstantString::QuoteStyle fullStyle;
-        unsigned int blockDepth;
+        CstExprConstantString::QuoteStyle fullStyle = CstExprConstantString::QuotedSingle;
+        unsigned int blockDepth = 0;
         if (options.storeCstData)
             std::tie(fullStyle, blockDepth) = extractStringDetails();
 
